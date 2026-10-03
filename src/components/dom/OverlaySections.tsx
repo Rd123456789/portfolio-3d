@@ -28,6 +28,7 @@ import {
   GitBranch,
   GithubLogo,
   LinkedinLogo,
+  LockSimple,
 } from "@phosphor-icons/react";
 
 interface OverlaySectionsProps {
@@ -719,14 +720,15 @@ export default function OverlaySections({
             </div>
           </div>
 
-          {/* Operations & Admin Strip */}
+          {/* Operations Strip */}
           <div className="mt-3 pt-3 border-t border-dotted border-[#3D3D3D]/60 flex items-center justify-between text-[9px] font-mono text-[#8A8A8A]">
             <span>ENGINEERED WITH NEXT.JS 16 & THREE.JS</span>
             <a
               href="/admin"
-              className="text-[#8A8A8A]/70 hover:text-[#FE6E00] transition-colors"
+              className="text-[#8A8A8A]/40 hover:text-[#FE6E00] transition-colors p-1"
+              aria-label="Secure portal"
             >
-              // SECURE ADMIN ACCESS
+              <LockSimple size={13} weight="thin" />
             </a>
           </div>
         </div>
