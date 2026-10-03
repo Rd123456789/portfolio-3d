@@ -1,26 +1,290 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
+@theme {
+  /* Charcoal (dark base - default) */
+  --color-dbg: #1A1A1A;
+  --color-ds: #242424;
+  --color-de: #2E2E2E;
+  --color-db: #3D3D3D;
+  --color-dm: #8A8A8A;
+  --color-dsc: #999999;
+  --color-dbd: #D6D6D6;
+  --color-dh: #F0F0F0;
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
+  /* Cool gray (light base) */
+  --color-lbg: #F5F5F7;
+  --color-ls: #FFFFFF;
+  --color-lb: #DDDFE3;
+  --color-lsc: #555555;
+  --color-lp: #111111;
+
+  /* Signal orange (the sole brand accent) */
+  --color-o50: #FDF0E8;
+  --color-o100: #F4B896;
+  --color-o200: #EC7D42;
+  --color-o400: #D95B28;
+  --color-o600: #A33D14;
+  --color-o800: #7A2B0E;
+  --color-o900: #4A1808;
+
+  /* Eucalyptus (functional success status primitive) */
+  --color-e50: #EAF0EE;
+  --color-e100: #BACDD0;
+  --color-e200: #72A899;
+  --color-e400: #3A7A65;
+  --color-e600: #2B5A4A;
+  --color-e800: #1B3A30;
+  --color-e900: #0F2219;
+
+  /* Semantic status colors */
+  --color-success: #3A7A65;
+  --color-error: #F43F5E;
+  --color-warning: #D9A441;
+  --color-info: #3E6F9E;
+  --color-progress: #3E6F9E;
+  --color-review: #C8923A;
+
+  /* Fonts */
+  --font-display: var(--font-lora);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+
+  /* Tracking */
+  --tracking-tightest: -0.04em;
+  --tracking-tighter2: -0.02em;
+  --tracking-wideish: 0.06em;
+  --tracking-wider2: 0.08em;
+  --tracking-widest2: 0.12em;
+
+  /* Spacing Tokens (4px / 8px scale) */
+  --spacing-1: 4px;
+  --spacing-2: 8px;
+  --spacing-3: 12px;
+  --spacing-4: 16px;
+  --spacing-5: 20px;
+  --spacing-6: 24px;
+  --spacing-8: 32px;
+  --spacing-10: 40px;
+  --spacing-12: 48px;
+  --spacing-16: 64px;
+  --spacing-20: 80px;
+  --spacing-24: 96px;
+  --spacing-32: 128px;
+
+  /* Container */
+  --container-page: 1200px;
+
+  /* Thermal gradient */
+  --background-image-thermal: linear-gradient(135deg, #FE5C0C 0%, #A90901 35%, #5C1A0A 55%, #2E1510 70%, #1A1A1A 100%);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+/* Global Reset & Base Rules */
+html {
+  background-color: var(--color-dbg);
+  color: var(--color-dbd);
+  font-family: var(--font-sans);
+  font-feature-settings: "ss01", "cv11";
+  scroll-behavior: auto !important;
+  overflow-x: clip;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background-color: var(--color-dbg);
+  color: var(--color-dbd);
+  overflow-x: clip;
+  margin: 0;
+  padding: 0;
+}
+
+/* Focus visible rule */
+:focus-visible {
+  outline: 2px solid var(--color-o400);
+  outline-offset: 2px;
+}
+
+/* Lenis smooth scrolling rules */
+html.lenis, html.lenis body {
+  height: auto;
+}
+
+.lenis.lenis-smooth {
+  scroll-behavior: auto !important;
+}
+
+.lenis.lenis-smooth [data-lenis-prevent] {
+  overscroll-behavior: contain;
+}
+
+.lenis.lenis-stopped {
+  overflow: hidden;
+}
+
+/* Industrial Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 4px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--color-dbg);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-db);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-o400);
+}
+
+/* Component Classes */
+.eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--color-o400);
+  line-height: 1;
+}
+
+.sq {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  background-color: var(--color-o400);
+  flex-shrink: 0;
+}
+
+.section-title {
+  font-family: var(--font-display);
+  font-size: clamp(32px, 4vw, 56px);
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  color: var(--color-dh);
+  font-weight: 400;
+}
+
+.meta-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--color-dm);
+  line-height: 1.4;
+}
+
+/* Buttons */
+.btn-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 14px 24px;
+  background: var(--color-o400);
+  color: #ffffff;
+  border: 1px solid var(--color-o400);
+  border-radius: 0;
+  cursor: pointer;
+  transition: transform 200ms ease, box-shadow 200ms ease, background 200ms ease;
+}
+
+.btn-primary:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 0 32px rgba(217, 91, 40, 0.4);
+}
+
+.btn-ghost {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 14px 24px;
+  background: transparent;
+  color: var(--color-dbd);
+  border: 1px solid var(--color-db);
+  border-radius: 0;
+  cursor: pointer;
+  transition: transform 200ms ease, border-color 200ms ease, color 200ms ease;
+}
+
+.btn-ghost:hover {
+  transform: translateY(-1px);
+  border-color: var(--color-dh);
+  color: var(--color-dh);
+}
+
+.btn-sm {
+  padding: 8px 16px !important;
+  font-size: 10px !important;
+}
+
+/* Texture Patterns */
+.bg-grid {
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.04) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+
+.bg-dots {
+  background-image: radial-gradient(rgba(255, 255, 255, 0.14) 1px, transparent 1px);
+  background-size: 20px 20px;
+}
+
+/* Modal Popup Backdrop rule: Pass blur through CSS custom property to prevent compiler drop */
+.popup-backdrop {
+  --popup-backdrop-blur: blur(10px);
+  background: rgba(0, 0, 0, 0.6);
+  -webkit-backdrop-filter: var(--popup-backdrop-blur);
+  backdrop-filter: var(--popup-backdrop-blur);
+}
+
+/* Symmetrical Section Container Standards */
+.section-container {
+  width: 100%;
+  max-width: var(--container-page);
+  margin-left: auto;
+  margin-right: auto;
+  padding-left: 1rem;
+  padding-right: 1rem;
+  padding-top: 5rem;
+  padding-bottom: 5rem;
+}
+
+@media (min-width: 640px) {
+  .section-container {
+    padding-left: 1.5rem;
+    padding-right: 1.5rem;
+    padding-top: 6rem;
+    padding-bottom: 6rem;
+  }
+}
+
+@media (min-width: 1024px) {
+  .section-container {
+    padding-left: 2rem;
+    padding-right: 2rem;
+    padding-top: 7.5rem;
+    padding-bottom: 7.5rem;
+  }
+}
+
+/* Industrial High-Contrast Shielded Card */
+.industrial-card {
+  background-color: rgba(36, 36, 36, 0.95);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  border: 1px dotted var(--color-db);
+  border-radius: 0;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7);
 }
