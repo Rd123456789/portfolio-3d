@@ -48,6 +48,10 @@ export default function OverlaySections({
 
   const handleContactSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (formData.message.trim().length < 20) {
+      setFormError("Role details must contain at least 20 characters before transmission.");
+      return;
+    }
     setIsSubmitting(true);
     setFormError(null);
     playTelemetryDispatch();
@@ -647,15 +651,27 @@ export default function OverlaySections({
               </div>
 
               <div>
-                <label className="meta-label block mb-1">
-                  ROLE OVERVIEW & OPPORTUNITY DETAILS
-                </label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="meta-label">
+                    ROLE OVERVIEW & OPPORTUNITY DETAILS
+                  </label>
+                  <span
+                    className={`font-mono text-[9px] ${
+                      formData.message.trim().length >= 20
+                        ? "text-[#3A7A65]"
+                        : "text-[#FE6E00]"
+                    }`}
+                  >
+                    {formData.message.trim().length}/20 MIN CHARACTERS
+                  </span>
+                </div>
                 <textarea
                   required
                   rows={3}
+                  minLength={20}
                   value={formData.message}
                   onChange={(e) => setFormData({ ...formData, message: e.target.value })}
-                  placeholder="Share role overview, tech stack requirements, location/remote details, or interview availability..."
+                  placeholder="Share role overview, tech stack requirements, location/remote details, or interview availability (min. 20 characters)..."
                   className="w-full px-3 py-2 bg-transparent border-b border-dotted border-[#3D3D3D] text-[#F0F0F0] placeholder-[#8A8A8A]/50 font-mono text-xs focus:border-[#FE6E00] focus:outline-none transition-colors resize-none"
                 />
               </div>
@@ -701,6 +717,17 @@ export default function OverlaySections({
                 <span>EMAIL</span>
               </a>
             </div>
+          </div>
+
+          {/* Operations & Admin Strip */}
+          <div className="mt-3 pt-3 border-t border-dotted border-[#3D3D3D]/60 flex items-center justify-between text-[9px] font-mono text-[#8A8A8A]">
+            <span>ENGINEERED WITH NEXT.JS 16 & THREE.JS</span>
+            <a
+              href="/admin"
+              className="text-[#8A8A8A]/70 hover:text-[#FE6E00] transition-colors"
+            >
+              // SECURE ADMIN ACCESS
+            </a>
           </div>
         </div>
       </section>
