@@ -183,6 +183,19 @@ export default function Navbar() {
             >
               // 04. GET IN TOUCH / HIRE ME
             </button>
+            <a
+              href="https://oxidised-jewllery.onrender.com/api/v1/portfolio/cv?download=true"
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={() => {
+                playIndustrialClick();
+                setMobileMenuOpen(false);
+              }}
+              className="flex items-center justify-between py-2 px-3 border border-dotted border-[#3D3D3D] hover:border-[#FE6E00] hover:text-[#FE6E00] text-[#FE6E00] transition-colors"
+            >
+              <span>// 05. DOWNLOAD CV</span>
+              <ArrowUpRight size={13} weight="thin" />
+            </a>
           </div>
           <div className="pt-2 border-t border-dotted border-[#3D3D3D] flex items-center justify-between text-[10px] font-mono text-[#8A8A8A]">
             <span>SOFTWARE ENGINEER // RAJDIP PARMAR</span>

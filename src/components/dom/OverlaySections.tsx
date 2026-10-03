@@ -43,15 +43,38 @@ export default function OverlaySections({
 }: OverlaySectionsProps) {
   const [formSubmitted, setFormSubmitted] = useState(false);
   const [formData, setFormData] = useState({ name: "", email: "", message: "" });
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
 
-  const handleContactSubmit = (e: React.FormEvent) => {
+  const handleContactSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setIsSubmitting(true);
+    setFormError(null);
     playTelemetryDispatch();
-    setFormSubmitted(true);
-    setTimeout(() => {
-      setFormSubmitted(false);
+
+    try {
+      const response = await fetch("https://oxidised-jewllery.onrender.com/api/v1/portfolio/contact", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(formData),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => null);
+        throw new Error(errorData?.message || "Failed to transmit inquiry");
+      }
+
+      setFormSubmitted(true);
       setFormData({ name: "", email: "", message: "" });
-    }, 4500);
+      setTimeout(() => {
+        setFormSubmitted(false);
+      }, 5000);
+    } catch (err: unknown) {
+      const errorMsg = err instanceof Error ? err.message : "Transmission failed. Please reach out via email directly.";
+      setFormError(errorMsg);
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -135,11 +158,13 @@ export default function OverlaySections({
               <ArrowUpRight size={14} weight="thin" />
             </a>
             <a
-              href={`mailto:${PERSONAL_INFO.email}?subject=Interview%20Inquiry%20-%20Rajdip%20Parmar`}
+              href="https://oxidised-jewllery.onrender.com/api/v1/portfolio/cv?download=true"
+              target="_blank"
+              rel="noopener noreferrer"
               onClick={() => playIndustrialClick()}
               className="btn-ghost !py-2.5 !px-4 !text-[11px] font-mono tracking-[0.08em]"
             >
-              <span>REQUEST RESUME / CV</span>
+              <span>DOWNLOAD CV</span>
               <ArrowUpRight size={14} weight="thin" />
             </a>
           </div>
@@ -588,6 +613,11 @@ export default function OverlaySections({
             </div>
           ) : (
             <form onSubmit={handleContactSubmit} className="space-y-5">
+              {formError && (
+                <div className="p-3 bg-[#1A1A1A] border border-dotted border-[#FE6E00] text-[#FE6E00] font-mono text-xs">
+                  ⚠ {formError}
+                </div>
+              )}
               <div>
                 <label className="meta-label block mb-1">
                   YOUR NAME / RECRUITER NAME
@@ -632,9 +662,10 @@ export default function OverlaySections({
 
               <button
                 type="submit"
-                className="btn-primary w-full justify-center !py-2.5 !px-4 !text-[11px] font-mono tracking-[0.08em]"
+                disabled={isSubmitting}
+                className="btn-primary w-full justify-center !py-2.5 !px-4 !text-[11px] font-mono tracking-[0.08em] disabled:opacity-50"
               >
-                <span>SEND MESSAGE</span>
+                <span>{isSubmitting ? "TRANSMITTING INQUIRY..." : "SEND MESSAGE"}</span>
                 <PaperPlaneTilt size={14} weight="thin" />
               </button>
             </form>
