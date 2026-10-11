@@ -92,9 +92,44 @@ export default function OverlaySections({
       ========================================================================= */}
       <section
         id="section-hero"
-        className="min-h-screen flex flex-col justify-between px-3 sm:px-6 lg:px-8 pt-16 pb-8 md:py-28 max-w-[1200px] mx-auto pointer-events-none border-b border-dotted border-[#3D3D3D]"
+        className="min-h-screen flex flex-col justify-between px-3 sm:px-6 lg:px-8 pt-[76px] pb-8 md:py-28 max-w-[1200px] mx-auto pointer-events-none border-b border-dotted border-[#3D3D3D] scroll-mt-[56px]"
       >
-        <div className="w-full max-w-2xl mt-2 sm:mt-8 bg-[#242424]/92 backdrop-blur-md border border-dotted border-[#3D3D3D] p-5 sm:p-8 pointer-events-auto shadow-2xl">
+        {/* Cartographic instrument furniture: real map conventions anchored in the
+            DOM so labels stay crisp. The globe carries the geography; these carry
+            the survey metadata a GIS product always shows. Hidden on phones,
+            where the hero card occupies the full width and there is nowhere for
+            them to sit without covering the headline. */}
+        <div className="hidden sm:flex absolute top-[76px] right-8 flex-col items-end gap-2.5">
+          <div className="flex items-center gap-1.5 bg-[#1A1A1A]/70 border border-dotted border-[#3D3D3D] px-2 py-1.5">
+            <svg width="11" height="24" viewBox="0 0 11 24" fill="none" aria-hidden="true">
+              <path d="M5.5 0 L10.5 7.5 L5.5 5.5 L0.5 7.5 Z" fill="#FE6E00" />
+              <rect x="4.9" y="5.5" width="1.2" height="18.5" fill="#3D3D3D" />
+            </svg>
+            <span className="font-mono text-[9px] tracking-[0.25em] text-[#797067]">N</span>
+          </div>
+
+          <div className="bg-[#1A1A1A]/70 border border-dotted border-[#3D3D3D] px-2 py-1.5">
+            <div className="flex gap-[2px] mb-1">
+              <span className="block w-3.5 h-[5px] bg-[#FFDBB0]" />
+              <span className="block w-3.5 h-[5px] bg-[#1A1A1A] border border-[#3D3D3D]" />
+              <span className="block w-3.5 h-[5px] bg-[#FFDBB0]" />
+              <span className="block w-3.5 h-[5px] bg-[#1A1A1A] border border-[#3D3D3D]" />
+              <span className="block w-3.5 h-[5px] bg-[#FFDBB0]" />
+            </div>
+            <div className="flex justify-between font-mono text-[8px] tracking-wider text-[#797067]">
+              <span>0</span>
+              <span>500 KM</span>
+            </div>
+          </div>
+
+          <div className="bg-[#1A1A1A]/70 border border-dotted border-[#3D3D3D] px-2 py-1 text-right">
+            <div className="font-mono text-[8px] tracking-[0.2em] text-[#797067]">WGS-84</div>
+            <div className="font-mono text-[8px] tracking-[0.2em] text-[#797067]">
+              EPSG:4326
+            </div>
+          </div>
+        </div>
+        <div className="w-full max-w-2xl mt-2 sm:mt-8 bg-gradient-to-b from-[#242424]/55 via-[#242424]/88 to-[#242424]/95 md:bg-[#242424]/92 border border-dotted border-[#3D3D3D] p-5 sm:p-8 pointer-events-auto shadow-2xl">
           {/* Eyebrow */}
           <div className="eyebrow mb-3 sm:mb-6">
             <span className="sq" />
@@ -187,10 +222,10 @@ export default function OverlaySections({
       ========================================================================= */}
       <section
         id="section-about"
-        className="min-h-screen flex flex-col justify-center px-4 sm:px-6 lg:px-8 py-20 md:py-28 max-w-[1200px] mx-auto pointer-events-none border-b border-dotted border-[#3D3D3D]"
+        className="min-h-screen flex flex-col justify-center px-4 sm:px-6 lg:px-8 py-20 md:py-28 max-w-[1200px] mx-auto pointer-events-none border-b border-dotted border-[#3D3D3D] scroll-mt-[56px]"
       >
         {/* Symmetrical High-Contrast Operations Dossier Enclosure */}
-        <div className="w-full max-w-4xl mx-auto bg-[#242424]/95 backdrop-blur-md border border-dotted border-[#3D3D3D] p-6 sm:p-10 pointer-events-auto shadow-2xl">
+        <div className="w-full max-w-4xl mx-auto bg-[#242424]/95 border border-dotted border-[#3D3D3D] p-6 sm:p-10 pointer-events-auto shadow-2xl">
           {/* Header Row */}
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 border-b border-dotted border-[#3D3D3D] pb-4 mb-6">
             <div className="eyebrow">
@@ -357,10 +392,10 @@ export default function OverlaySections({
       ========================================================================= */}
       <section
         id="section-works"
-        className="min-h-screen flex flex-col justify-center px-4 sm:px-6 lg:px-8 py-20 md:py-28 max-w-[1200px] mx-auto pointer-events-none border-b border-dotted border-[#3D3D3D]"
+        className="min-h-screen flex flex-col justify-center px-4 sm:px-6 lg:px-8 py-20 md:py-28 max-w-[1200px] mx-auto pointer-events-none border-b border-dotted border-[#3D3D3D] scroll-mt-[56px]"
       >
         {/* DESKTOP VIEW (Project Selection Deck on Left, 3D Interactive Model on Right) */}
-        <div className="hidden md:block w-full max-w-lg bg-[#242424]/90 backdrop-blur-md border border-dotted border-[#3D3D3D] p-8 pointer-events-auto shadow-2xl">
+        <div className="hidden md:block w-full max-w-lg bg-[#242424]/90 border border-dotted border-[#3D3D3D] p-8 pointer-events-auto shadow-2xl">
           <div className="eyebrow mb-3">
             <span className="sq" />
             <span>FEATURED ENGINEERING PROJECTS</span>
@@ -448,7 +483,7 @@ export default function OverlaySections({
         {/* MOBILE VIEW (Header -> 3D Interactive Asset Stage -> Projects Deck) */}
         <div className="md:hidden flex flex-col space-y-4 pointer-events-auto">
           {/* Mobile Header Card */}
-          <div className="bg-[#242424]/95 backdrop-blur-md border border-dotted border-[#3D3D3D] p-5">
+          <div className="bg-[#242424]/95 border border-dotted border-[#3D3D3D] p-5">
             <div className="eyebrow mb-2">
               <span className="sq" />
               <span>FEATURED ENGINEERING PROJECTS</span>
@@ -497,7 +532,7 @@ export default function OverlaySections({
           </div>
 
           {/* Mobile Projects Controller Deck */}
-          <div className="bg-[#242424]/95 backdrop-blur-md border border-dotted border-[#3D3D3D] p-4">
+          <div className="bg-[#242424]/95 border border-dotted border-[#3D3D3D] p-4">
             <div className="flex items-center justify-between pb-3 mb-3 border-b border-dotted border-[#3D3D3D]">
               <span className="meta-label text-[9px] text-[#8A8A8A]">SELECT PROJECT</span>
               <span className="font-mono text-[9px] text-[#FE6E00]">
@@ -583,7 +618,7 @@ export default function OverlaySections({
       ========================================================================= */}
       <section
         id="section-contact"
-        className="min-h-screen flex flex-col justify-center items-start px-4 sm:px-6 lg:px-8 py-20 md:py-28 max-w-[1200px] mx-auto pointer-events-none"
+        className="min-h-screen flex flex-col justify-center items-start px-4 sm:px-6 lg:px-8 py-20 md:py-28 max-w-[1200px] mx-auto pointer-events-none scroll-mt-[56px]"
       >
         {/* Mobile 3D Grid Transmission Observation Window */}
         <div className="md:hidden w-full h-[180px] border border-dotted border-[#FE6E00]/30 bg-[#1A1A1A]/30 relative mb-4 flex items-start justify-between p-2.5 pointer-events-none">

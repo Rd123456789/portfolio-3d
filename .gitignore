@@ -46,3 +46,6 @@ next-env.d.ts
 /capture_*.js
 /audit_*.js
 /take_*.js
+/analyze_*.js
+/measure_*.js
+/shoot_*.js

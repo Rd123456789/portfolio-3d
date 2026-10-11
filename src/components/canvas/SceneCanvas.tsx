@@ -2,6 +2,7 @@
 
 import React, { Suspense, useState, useEffect } from "react";
 import { Canvas } from "@react-three/fiber";
+import { PerformanceMonitor, AdaptiveDpr } from "@react-three/drei";
 import * as THREE from "three";
 import Experience from "./Experience";
 import { Project } from "@/lib/projects";
@@ -30,17 +31,18 @@ export default function SceneCanvas({
     <div className="fixed inset-0 z-0 pointer-events-auto">
       <Canvas
         camera={{ position: [0, 0, 5.5], fov: 45, near: 0.1, far: 100 }}
-        dpr={isMobile ? [1, 1.25] : [1, 1.75]}
-        performance={{ min: 0.5 }}
+        dpr={isMobile ? [1, 1.25] : [1, 1.5]}
         gl={{
           antialias: true,
           powerPreference: "high-performance",
           alpha: true,
+          stencil: false,
           toneMapping: THREE.ACESFilmicToneMapping,
           toneMappingExposure: 1.05,
         }}
-        shadows
       >
+        <PerformanceMonitor step={0.2} threshold={0.7} />
+        <AdaptiveDpr pixelated={false} />
         <Suspense fallback={null}>
           <Experience
             onSelectProject={onSelectProject}

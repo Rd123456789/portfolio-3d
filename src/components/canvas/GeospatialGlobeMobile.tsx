@@ -1,32 +1,30 @@
 "use client";
 
-import React, { useRef, useMemo } from "react";
+import React, { useRef, useMemo, useEffect } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
+import {
+  latLonToVector3,
+  buildTerrainDotMatrix,
+  buildGreatCircleArc,
+  buildLandmarkMarkers,
+  indiaCoastlinePositions,
+  INDIA_RINGS,
+  buildGraticule,
+  sceneSunVector,
+} from "@/lib/geo";
+import {
+  createAtmosphereMaterial,
+  createGlobeCoreMaterial,
+  createTerrainDotMatrixMaterial,
+  createLandmarkMaterial,
+  createNightLightMaterial,
+  syncDotMatrixScale,
+} from "@/lib/shaders";
 
 interface GeospatialGlobeMobileProps {
   position?: [number, number, number];
   scale?: number;
-}
-
-function latLonToVector3(lat: number, lon: number, radius: number): THREE.Vector3 {
-  const phi = (90 - lat) * (Math.PI / 180);
-  const theta = (lon + 180) * (Math.PI / 180);
-  return new THREE.Vector3(
-    -(radius * Math.sin(phi) * Math.cos(theta)),
-    radius * Math.cos(phi),
-    radius * Math.sin(phi) * Math.sin(theta)
-  );
-}
-
-function isLandmass(lat: number, lon: number): boolean {
-  if (lat >= 6 && lat <= 36 && lon >= 68 && lon <= 92) return true; // India / South Asia
-  if (lat >= 10 && lat <= 50 && lon >= 92 && lon <= 145) return true; // SE Asia
-  if (lat >= 12 && lat <= 65 && lon >= -10 && lon <= 65) return true; // Europe & Middle East
-  if (lat >= -35 && lat <= 35 && lon >= -18 && lon <= 52) return true; // Africa
-  if (lat >= 15 && lat <= 70 && lon >= -168 && lon <= -50) return true; // Americas
-  if (lat >= -56 && lat <= 12 && lon >= -82 && lon <= -34) return true;
-  return false;
 }
 
 interface MobileGroundBeaconConfig {
@@ -38,7 +36,9 @@ interface MobileGroundBeaconConfig {
   pulseSpeed: number;
 }
 
-// Sleek flush surface radar beacon (zero clunky boxes, zero lollipop sticks, zero 3D text)
+// Flush surface radar beacon: anchor ring, expanding wave, needle and point.
+// Same read as the desktop beacon, reduced one ring because the phone screen is
+// a quarter the area and a second wave just muddies it.
 function MobileGroundBeacon({
   beacon,
   globeRadius,
@@ -73,15 +73,13 @@ function MobileGroundBeacon({
 
   return (
     <group position={position} quaternion={orientationQuat}>
-      {/* 1. Flush Ground Anchor Ring on Sphere Surface */}
       <mesh rotation={[-Math.PI / 2, 0, 0]}>
-        <ringGeometry args={[0.015, 0.026, 24]} />
+        <ringGeometry args={[0.015, 0.026, 16]} />
         <meshBasicMaterial color={beacon.color} side={THREE.DoubleSide} />
       </mesh>
 
-      {/* 2. Concentric Pulsing Wave */}
       <mesh ref={pingRingRef} rotation={[-Math.PI / 2, 0, 0]}>
-        <ringGeometry args={[0.02, 0.034, 24]} />
+        <ringGeometry args={[0.02, 0.034, 16]} />
         <meshBasicMaterial
           color={beacon.color}
           side={THREE.DoubleSide}
@@ -90,108 +88,236 @@ function MobileGroundBeacon({
         />
       </mesh>
 
-      {/* 3. Slender Laser Needle (Hairline 0.001) */}
       <mesh position={[0, 0.04, 0]}>
-        <cylinderGeometry args={[0.001, 0.002, 0.08, 8]} />
+        <cylinderGeometry args={[0.001, 0.002, 0.08, 6]} />
         <meshBasicMaterial color={beacon.coreColor} transparent opacity={0.85} />
       </mesh>
 
-      {/* 4. Glowing Micro Point */}
-      <mesh position={[0, 0.08, 0]}>
-        <sphereGeometry args={[0.009, 10, 10]} />
-        <meshBasicMaterial color="#FFFFFF" />
+      {/* Data column rising off the beacon */}
+      <mesh position={[0, 0.13, 0]}>
+        <cylinderGeometry args={[0.005, 0.008, 0.16, 6]} />
+        <meshBasicMaterial
+          color={beacon.color}
+          transparent
+          opacity={0.35}
+          blending={THREE.AdditiveBlending}
+          depthWrite={false}
+        />
+      </mesh>
+
+      <mesh position={[0, 0.2, 0]}>
+        <sphereGeometry args={[0.012, 8, 8]} />
+        <meshBasicMaterial
+          color={beacon.color}
+          transparent
+          opacity={0.5}
+          blending={THREE.AdditiveBlending}
+          depthWrite={false}
+        />
       </mesh>
     </group>
   );
 }
 
+// Scratch vector reused by the arc riders — keeps the frame loop allocation-free.
+const ARC_POSITION = new THREE.Vector3();
+
 export default function GeospatialGlobeMobile({
-  position = [0, 1.35, -0.5],
-  scale = 1.15,
+  position = [0, 0, 0],
+  scale = 1,
 }: GeospatialGlobeMobileProps) {
   const rootGroupRef = useRef<THREE.Group>(null!);
   const globeInnerRef = useRef<THREE.Group>(null!);
   const orbitRingRef = useRef<THREE.Group>(null!);
-  const arcPacketRef = useRef<THREE.Mesh>(null!);
+  const arcPacketRefs = useRef<THREE.Mesh[]>([]);
+  const arcTrailRefs = useRef<THREE.Mesh[]>([]);
 
-  // Mobile Continental Dot Matrix (680 crisp points for buttery 60 FPS mobile performance)
-  const [pointPositions, pointColors] = useMemo(() => {
+  // Sun vector for the true sub-solar point at the current wall-clock time, so
+  // the terminator, night lights and relief shading all agree on the phone too.
+  const SUN_VECTOR = useMemo(() => sceneSunVector(new Date()), []);
+
+  // Terrain dot matrix at a coarser lattice than desktop: the phone renders far
+  // fewer pixels, so a dense lattice would only cost fill with no visible gain.
+  const terrainMatrix = useMemo(
+    () => buildTerrainDotMatrix(4.0, 0.14, 0.014, SUN_VECTOR),
+    [SUN_VECTOR]
+  );
+  const pointPositions = terrainMatrix.positions;
+  const pointColors = terrainMatrix.colors;
+
+  // Real coastline line loops, identical geography to the desktop globe
+  const coastlineRings = useMemo(
+    () => INDIA_RINGS.map((ring) => indiaCoastlinePositions(1.032, [ring])),
+    []
+  );
+
+  // Survey graticule at true 15-degree intervals
+  const graticule = useMemo(() => buildGraticule(1.0), []);
+
+  // City gazetteer, tiered. Fewer secondary cities than desktop so the pin set
+  // still reads at phone scale instead of turning into noise.
+  const tier1Markers = useMemo(
+    () =>
+      buildLandmarkMarkers([
+        { lat: 23.02, lon: 72.57, color: "#FFB74D" }, // Ahmedabad
+        { lat: 21.25, lon: 81.62, color: "#FFB74D" }, // Raipur
+        { lat: 26.9, lon: 75.8, color: "#FE6E00" }, // Jaipur
+        { lat: 1.35, lon: 103.82, color: "#38BDF8" }, // Singapore
+      ]),
+    []
+  );
+  const tier2Markers = useMemo(
+    () =>
+      buildLandmarkMarkers([
+        { lat: 19.07, lon: 72.87, color: "#FFFFFF" }, // Mumbai
+        { lat: 28.61, lon: 77.2, color: "#FFFFFF" }, // Delhi
+        { lat: 12.97, lon: 77.59, color: "#FFFFFF" }, // Bengaluru
+        { lat: 22.57, lon: 88.36, color: "#FFFFFF" }, // Kolkata
+        { lat: 50.11, lon: 8.68, color: "#38BDF8" }, // Frankfurt
+      ]),
+    []
+  );
+
+  // Night-side urban glow, sized by real metropolitan population
+  const nightLights = useMemo(() => {
+    const cities = [
+      { lat: 28.61, lon: 77.2, pop: 32.9 },
+      { lat: 19.07, lon: 72.87, pop: 21.7 },
+      { lat: 22.57, lon: 88.36, pop: 15.3 },
+      { lat: 12.97, lon: 77.59, pop: 13.6 },
+      { lat: 13.08, lon: 80.27, pop: 11.5 },
+      { lat: 23.02, lon: 72.57, pop: 8.4 },
+      { lat: 17.38, lon: 78.48, pop: 10.5 },
+      { lat: 26.9, lon: 75.8, pop: 4.0 },
+      { lat: 21.25, lon: 81.62, pop: 1.4 },
+      { lat: 25.2, lon: 55.27, pop: 3.5 },
+      { lat: 1.35, lon: 103.82, pop: 6.0 },
+    ];
+
     const coords: number[] = [];
     const colors: number[] = [];
+    const sizes: number[] = [];
+    const warm = new THREE.Color("#FFD9A0");
+    const c = new THREE.Color();
 
-    const orange = new THREE.Color("#FE6E00");
-    const orangeWarm = new THREE.Color("#FFB74D");
-    const white = new THREE.Color("#FFFFFF");
-    const steel = new THREE.Color("#4A4A4A");
-
-    for (let lat = -80; lat <= 80; lat += 4.2) {
-      const radiusAtLat = Math.cos((lat * Math.PI) / 180);
-      const lonStep = Math.max(4.2, 4.2 / (radiusAtLat || 0.1));
-
-      for (let lon = -180; lon < 180; lon += lonStep) {
-        const isLand = isLandmass(lat, lon);
-        if (!isLand && Math.random() > 0.12) continue;
-
-        const isIndia = lat >= 8 && lat <= 32 && lon >= 68 && lon <= 88;
-        const radius = isLand ? (isIndia ? 1.026 : 1.02) : 1.01;
-        const v = latLonToVector3(lat, lon, radius);
-
-        coords.push(v.x, v.y, v.z);
-
-        if (isIndia) {
-          colors.push(orange.r, orange.g, orange.b);
-        } else if (isLand) {
-          const col = Math.random() > 0.4 ? white : orangeWarm;
-          colors.push(col.r, col.g, col.b);
-        } else {
-          colors.push(steel.r, steel.g, steel.b);
-        }
-      }
+    for (const city of cities) {
+      const v = latLonToVector3(city.lat, city.lon, 1.014);
+      coords.push(v.x, v.y, v.z);
+      const t = Math.min(1, city.pop / 30);
+      c.copy(warm).lerp(new THREE.Color("#FF9E3D"), t);
+      colors.push(c.r, c.g, c.b);
+      sizes.push(0.018 + Math.sqrt(city.pop) * 0.0075);
     }
 
-    return [new Float32Array(coords), new Float32Array(colors)];
-  }, []);
-
-  // Distinct Regional Beacons
-  const beacons: MobileGroundBeaconConfig[] = useMemo(() => [
-    {
-      id: "ahmedabad",
-      lat: 23.02,
-      lon: 72.57,
-      color: "#FE6E00",
-      coreColor: "#FFB74D",
-      pulseSpeed: 1.4,
-    },
-    {
-      id: "cspdcl-raipur",
-      lat: 21.25,
-      lon: 81.62,
-      color: "#FFB74D",
-      coreColor: "#FFFFFF",
-      pulseSpeed: 1.6,
-    },
-    {
-      id: "cloud-singapore",
-      lat: 1.35,
-      lon: 103.82,
-      color: "#38BDF8",
-      coreColor: "#FFFFFF",
-      pulseSpeed: 1.3,
-    },
-  ], []);
-
-  // Mobile Great Circle Arc: Ahmedabad <-> Raipur
-  const { arcCurve, arcPoints } = useMemo(() => {
-    const p1 = latLonToVector3(23.02, 72.57, 1.025);
-    const p2 = latLonToVector3(21.25, 81.62, 1.025);
-    const mid = new THREE.Vector3().addVectors(p1, p2).multiplyScalar(0.5);
-    mid.normalize().multiplyScalar(1.20);
-    const c = new THREE.QuadraticBezierCurve3(p1, mid, p2);
     return {
-      arcCurve: c,
-      arcPoints: c.getPoints(24),
+      positions: new Float32Array(coords),
+      colors: new Float32Array(colors),
+      sizes: new Float32Array(sizes),
     };
   }, []);
+
+  const beacons: MobileGroundBeaconConfig[] = useMemo(
+    () => [
+      {
+        id: "ahmedabad",
+        lat: 23.02,
+        lon: 72.57,
+        color: "#FE6E00",
+        coreColor: "#FFB74D",
+        pulseSpeed: 1.4,
+      },
+      {
+        id: "cspdcl-raipur",
+        lat: 21.25,
+        lon: 81.62,
+        color: "#FFB74D",
+        coreColor: "#FFFFFF",
+        pulseSpeed: 1.6,
+      },
+      {
+        id: "cloud-singapore",
+        lat: 1.35,
+        lon: 103.82,
+        color: "#38BDF8",
+        coreColor: "#FFFFFF",
+        pulseSpeed: 1.3,
+      },
+    ],
+    []
+  );
+
+  // Two telemetry links, matching the two most important desktop routes.
+  // Each carries photon riders with comet trails.
+  const ARCS = useMemo(
+    () => [
+      {
+        id: "raipur",
+        curve: buildGreatCircleArc(23.02, 72.57, 21.25, 81.62, 1.025, 0.2),
+        color: "#FE6E00",
+        packets: 2,
+        speed: 0.6,
+      },
+      {
+        id: "singapore",
+        curve: buildGreatCircleArc(23.02, 72.57, 1.35, 103.82, 1.025, 0.325),
+        color: "#38BDF8",
+        packets: 2,
+        speed: 0.45,
+      },
+    ],
+    []
+  );
+
+  const arcTubes = useMemo(
+    () =>
+      ARCS.map(
+        (a) => new THREE.TubeGeometry(a.curve, 22, 0.004, 5, false)
+      ),
+    [ARCS]
+  );
+
+  const coreMaterial = useMemo(
+    () => createGlobeCoreMaterial(SUN_VECTOR),
+    [SUN_VECTOR]
+  );
+  const dotMaterial = useMemo(
+    () => createTerrainDotMatrixMaterial({ size: 0.05, opacity: 0.96 }),
+    []
+  );
+  const atmosphereMaterial = useMemo(
+    () => createAtmosphereMaterial(SUN_VECTOR),
+    [SUN_VECTOR]
+  );
+  const landmarkMaterial = useMemo(() => createLandmarkMaterial(0.13), []);
+  const landmarkSecondaryMaterial = useMemo(
+    () => createLandmarkMaterial(0.085),
+    []
+  );
+  const nightLightMaterial = useMemo(
+    () => createNightLightMaterial({ sun: SUN_VECTOR }),
+    [SUN_VECTOR]
+  );
+
+  useEffect(
+    () => () => {
+      coreMaterial.dispose();
+      dotMaterial.dispose();
+      atmosphereMaterial.dispose();
+      landmarkMaterial.dispose();
+      landmarkSecondaryMaterial.dispose();
+      nightLightMaterial.dispose();
+      arcTubes.forEach((g) => g.dispose());
+    },
+    [
+      coreMaterial,
+      dotMaterial,
+      atmosphereMaterial,
+      landmarkMaterial,
+      landmarkSecondaryMaterial,
+      nightLightMaterial,
+      arcTubes,
+    ]
+  );
 
   useFrame((state, delta) => {
     const t = state.clock.getElapsedTime();
@@ -200,16 +326,50 @@ export default function GeospatialGlobeMobile({
       globeInnerRef.current.rotation.y += delta * 0.12;
     }
 
+    syncDotMatrixScale(dotMaterial, state.size.height, state.viewport.dpr);
+    syncDotMatrixScale(landmarkMaterial, state.size.height, state.viewport.dpr);
+    syncDotMatrixScale(
+      landmarkSecondaryMaterial,
+      state.size.height,
+      state.viewport.dpr
+    );
+    syncDotMatrixScale(
+      nightLightMaterial,
+      state.size.height,
+      state.viewport.dpr
+    );
+
+    if (landmarkMaterial.uniforms?.uTime) {
+      landmarkMaterial.uniforms.uTime.value = t;
+    }
+    if (landmarkSecondaryMaterial.uniforms?.uTime) {
+      landmarkSecondaryMaterial.uniforms.uTime.value = t * 0.6 + 1.7;
+    }
+    if (coreMaterial.uniforms?.uTime) {
+      coreMaterial.uniforms.uTime.value = t;
+    }
+
     if (orbitRingRef.current) {
       orbitRingRef.current.rotation.z += delta * 0.35;
       orbitRingRef.current.rotation.y = Math.sin(t * 0.3) * 0.1;
     }
 
-    if (arcPacketRef.current && arcCurve) {
-      const u = (t * 0.6) % 1;
-      const pt = arcCurve.getPoint(u);
-      arcPacketRef.current.position.copy(pt);
-    }
+    // Photon riders on each link, phased so the two routes never sync up
+    ARCS.forEach((arc, ai) => {
+      for (let i = 0; i < arc.packets; i++) {
+        const u = (t * arc.speed + ai * 0.3 + i / arc.packets) % 1;
+        const packet = arcPacketRefs.current[ai * 3 + i];
+        if (packet) {
+          arc.curve.getPoint(u, ARC_POSITION);
+          packet.position.copy(ARC_POSITION);
+        }
+        const trail = arcTrailRefs.current[ai * 3 + i];
+        if (trail) {
+          arc.curve.getPoint((u - 0.04 + 1) % 1, ARC_POSITION);
+          trail.position.copy(ARC_POSITION);
+        }
+      }
+    });
 
     // Touch tilt response
     if (rootGroupRef.current) {
@@ -233,106 +393,230 @@ export default function GeospatialGlobeMobile({
   return (
     <group ref={rootGroupRef} position={position} scale={scale}>
       <group ref={globeInnerRef} rotation={[0.08, -1.95, 0]}>
-        {/* 1. Deep Core Shell (#141414) */}
-        <mesh>
-          <sphereGeometry args={[0.96, 24, 24]} />
-          <meshStandardMaterial
-            color="#141414"
-            roughness={0.25}
-            metalness={0.7}
-          />
+        {/* 1. Deep Core Shell (lit in-shader: terminator + warm rim) */}
+        <mesh material={coreMaterial}>
+          <sphereGeometry args={[0.96, 20, 20]} />
         </mesh>
 
-        {/* 2. Atmospheric Halo */}
-        <mesh>
-          <sphereGeometry args={[1.04, 24, 24]} />
-          <meshStandardMaterial
-            color="#FE6E00"
-            transparent
-            opacity={0.07}
-            side={THREE.BackSide}
-          />
+        {/* 2. Atmospheric Halo with forward scattering */}
+        <mesh material={atmosphereMaterial}>
+          <sphereGeometry args={[1.04, 20, 20]} />
         </mesh>
 
-        {/* 3. Lat-Lon Wireframe Grid */}
-        <mesh>
-          <sphereGeometry args={[1.005, 24, 12]} />
-          <meshStandardMaterial
-            color="#3D3D3D"
-            wireframe
-            transparent
-            opacity={0.18}
-          />
-        </mesh>
+        {/* 3. Survey graticule at true 15-degree intervals */}
+        <line>
+          <bufferGeometry>
+            <bufferAttribute
+              attach="attributes-position"
+              args={[graticule.standard, 3]}
+            />
+          </bufferGeometry>
+          <lineBasicMaterial color="#4A4A4A" transparent opacity={0.3} />
+        </line>
+        <line>
+          <bufferGeometry>
+            <bufferAttribute
+              attach="attributes-position"
+              args={[graticule.equator, 3]}
+            />
+          </bufferGeometry>
+          <lineBasicMaterial color="#FFB74D" transparent opacity={0.45} />
+        </line>
 
-        {/* 4. Continental Telemetry Dots */}
-        <points>
+        {/* 4. Continental terrain dots (relief + hillshade baked on the CPU) */}
+        <points material={dotMaterial}>
           <bufferGeometry>
             <bufferAttribute
               attach="attributes-position"
               args={[pointPositions, 3]}
             />
             <bufferAttribute
-              attach="attributes-color"
+              attach="attributes-aColor"
               args={[pointColors, 3]}
             />
           </bufferGeometry>
-          <pointsMaterial
-            size={0.044}
-            vertexColors
-            transparent
-            opacity={0.96}
-            blending={THREE.AdditiveBlending}
-            depthWrite={false}
-          />
         </points>
 
-        {/* 5. Mobile Flush Surface Radar Ground Beacons (Zero 3D Text, Zero Lollipops) */}
+        {/* 5. Real coastline line loops */}
+        {coastlineRings.map((positions, i) => (
+          <line key={`coast-${i}`}>
+            <bufferGeometry>
+              <bufferAttribute
+                attach="attributes-position"
+                args={[positions, 3]}
+              />
+            </bufferGeometry>
+            <lineBasicMaterial
+              color="#FFDBB0"
+              transparent
+              opacity={0.8}
+            />
+          </line>
+        ))}
+
+        {/* 6. Tiered city pins */}
+        <points material={landmarkMaterial}>
+          <bufferGeometry>
+            <bufferAttribute
+              attach="attributes-position"
+              args={[tier1Markers.positions, 3]}
+            />
+            <bufferAttribute
+              attach="attributes-aColor"
+              args={[tier1Markers.colors, 3]}
+            />
+          </bufferGeometry>
+        </points>
+        <points material={landmarkSecondaryMaterial}>
+          <bufferGeometry>
+            <bufferAttribute
+              attach="attributes-position"
+              args={[tier2Markers.positions, 3]}
+            />
+            <bufferAttribute
+              attach="attributes-aColor"
+              args={[tier2Markers.colors, 3]}
+            />
+          </bufferGeometry>
+        </points>
+
+        {/* 7. Night-side urban glow, masked to the dark hemisphere */}
+        <points material={nightLightMaterial}>
+          <bufferGeometry>
+            <bufferAttribute
+              attach="attributes-position"
+              args={[nightLights.positions, 3]}
+            />
+            <bufferAttribute
+              attach="attributes-aColor"
+              args={[nightLights.colors, 3]}
+            />
+            <bufferAttribute
+              attach="attributes-aSize"
+              args={[nightLights.sizes, 1]}
+            />
+          </bufferGeometry>
+        </points>
+
+        {/* 8. Flush surface radar ground beacons */}
         {beacons.map((b) => (
           <MobileGroundBeacon key={b.id} beacon={b} globeRadius={1.025} />
         ))}
 
-        {/* 6. Inter-City Telemetry Arc */}
-        <line>
-          <bufferGeometry>
-            <bufferAttribute
-              attach="attributes-position"
-              args={[
-                new Float32Array(arcPoints.flatMap((p) => [p.x, p.y, p.z])),
-                3,
-              ]}
-            />
-          </bufferGeometry>
-          <lineBasicMaterial color="#FE6E00" transparent opacity={0.75} />
-        </line>
+        {/* 9. Telemetry links with photon riders and comet trails */}
+        {ARCS.map((arc, ai) => (
+          <React.Fragment key={arc.id}>
+            <mesh geometry={arcTubes[ai]}>
+              <meshBasicMaterial
+                color={arc.color}
+                transparent
+                opacity={0.55}
+                blending={THREE.AdditiveBlending}
+                depthWrite={false}
+              />
+            </mesh>
+            {Array.from({ length: arc.packets }, (_, i) => (
+              <React.Fragment key={`${arc.id}-pkt-${i}`}>
+                <mesh
+                  ref={(el) => {
+                    arcTrailRefs.current[ai * 3 + i] = el as THREE.Mesh;
+                  }}
+                >
+                  <sphereGeometry args={[0.008, 6, 6]} />
+                  <meshBasicMaterial
+                    color={arc.color}
+                    transparent
+                    opacity={0.3}
+                    blending={THREE.AdditiveBlending}
+                    depthWrite={false}
+                  />
+                </mesh>
+                <mesh
+                  ref={(el) => {
+                    arcPacketRefs.current[ai * 3 + i] = el as THREE.Mesh;
+                  }}
+                >
+                  <sphereGeometry args={[0.013, 8, 8]} />
+                  <meshBasicMaterial color="#FFFFFF" />
+                </mesh>
+              </React.Fragment>
+            ))}
+          </React.Fragment>
+        ))}
 
-        {/* 7. Traveling Data Packet on Arc */}
-        <mesh ref={arcPacketRef}>
-          <sphereGeometry args={[0.012, 8, 8]} />
-          <meshBasicMaterial color="#FFFFFF" />
-        </mesh>
-
-        {/* 8. Precision Instrument Orbital Ring */}
+        {/* 10. Precision instrument orbital ring */}
         <mesh rotation={[Math.PI / 3, 0.4, 0]}>
-          <torusGeometry args={[1.045, 0.002, 12, 60]} />
+          <torusGeometry args={[1.045, 0.002, 6, 40]} />
           <meshBasicMaterial color="#FE6E00" transparent opacity={0.45} />
         </mesh>
       </group>
 
-      {/* 9. Orbiting Satellite Micro Node */}
+      {/* 11. Orbiting satellite micro node — long thin deployed arrays on a small
+          bus, the same spacecraft silhouette as the desktop unit. */}
       <group ref={orbitRingRef} rotation={[0.45, 0.2, 0.8]}>
-        <mesh>
-          <torusGeometry args={[1.38, 0.002, 12, 60]} />
-          <meshBasicMaterial color="#FE6E00" transparent opacity={0.35} />
+        <mesh rotation={[Math.PI / 2, 0, 0]}>
+          <torusGeometry args={[1.38, 0.002, 6, 40]} />
+          <meshBasicMaterial color="#FE6E00" transparent opacity={0.32} />
         </mesh>
-        <mesh position={[1.38, 0, 0]}>
-          <boxGeometry args={[0.05, 0.025, 0.025]} />
-          <meshStandardMaterial
-            color="#FE6E00"
-            emissive="#FE6E00"
-            emissiveIntensity={3}
-          />
-        </mesh>
+        <group position={[1.38, 0, 0]}>
+          {/* Deployed arrays: three thin cells per wing */}
+          {[-1, 1].map((dir) => (
+            <group key={dir} position={[dir * 0.028, 0, 0]}>
+              {Array.from({ length: 3 }, (_, i) => (
+                <mesh
+                  key={i}
+                  position={[dir * (0.038 + i * 0.055 + 0.0275), 0, 0]}
+                >
+                  <boxGeometry args={[0.0518, 0.002, 0.04]} />
+                  <meshStandardMaterial
+                    color="#1E2A44"
+                    metalness={0.65}
+                    roughness={0.35}
+                    emissive="#3B6FE2"
+                    emissiveIntensity={0.3}
+                  />
+                </mesh>
+              ))}
+            </group>
+          ))}
+
+          {/* Small cylindrical bus with a gold MLI band */}
+          <mesh rotation={[0, 0, Math.PI / 2]}>
+            <cylinderGeometry args={[0.024, 0.024, 0.046, 8]} />
+            <meshStandardMaterial color="#2A2A2A" metalness={0.9} roughness={0.3} />
+          </mesh>
+          <mesh rotation={[0, 0, Math.PI / 2]}>
+            <cylinderGeometry args={[0.025, 0.025, 0.02, 8]} />
+            <meshStandardMaterial
+              color="#FFB74D"
+              metalness={0.9}
+              roughness={0.15}
+              emissive="#FFB74D"
+              emissiveIntensity={0.3}
+            />
+          </mesh>
+
+          {/* High-gain dish pointed at the ground station */}
+          <mesh position={[0, -0.034, 0]} rotation={[Math.PI, 0, 0]}>
+            <coneGeometry args={[0.024, 0.018, 10, 1, true]} />
+            <meshStandardMaterial
+              color="#C9C9C9"
+              metalness={0.9}
+              roughness={0.25}
+              side={THREE.DoubleSide}
+            />
+          </mesh>
+
+          {/* Nadir instrument aperture */}
+          <mesh position={[0, 0.028, 0]} rotation={[Math.PI, 0, 0]}>
+            <cylinderGeometry args={[0.009, 0.009, 0.011, 10]} />
+            <meshStandardMaterial
+              color="#FE6E00"
+              emissive="#FE6E00"
+              emissiveIntensity={2.5}
+            />
+          </mesh>
+        </group>
       </group>
     </group>
   );

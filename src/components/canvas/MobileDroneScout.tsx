@@ -1,9 +1,10 @@
 "use client";
 
-import React, { useRef, useMemo } from "react";
+import React, { useRef, useMemo, useEffect } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 import { Project } from "@/lib/projects";
+import { createDiscMaterial, tickDiscMaterial } from "@/lib/shaders";
 
 interface MobileDroneScoutProps {
   activeProject?: Project | null;
@@ -21,6 +22,46 @@ export default function MobileDroneScout({
   const sensorTurretRef = useRef<THREE.Group>(null!);
   const lidarRingsRef = useRef<THREE.Group>(null!);
   const groundRingsRef = useRef<THREE.Group>(null!);
+  const surveyRef = useRef<THREE.Group>(null!);
+  const swathProgressRef = useRef<THREE.Mesh>(null!);
+  const scanPoolRef = useRef<THREE.Mesh>(null!);
+  const photoStationRefs = useRef<THREE.Mesh[]>([]);
+
+  // Survey plan at a phone budget: five swaths instead of the desktop's seven,
+  // same boustrophedon geometry and the same mission semantics.
+  const mobileSurvey = useMemo(() => {
+    const swathCount = 5;
+    const swathWidth = 0.56;
+    const swathLength = 2.2;
+    const swathXs = Array.from(
+      { length: swathCount },
+      (_, i) => (i - (swathCount - 1) / 2) * swathWidth
+    );
+
+    const stations = Array.from({ length: 4 }, (_, i) => ({
+      x: swathXs[0],
+      z: -swathLength / 2 + (i / 4) * swathLength,
+    }));
+
+    return {
+      swaths: swathXs,
+      swathLength,
+      stations,
+    };
+  }, []);
+
+  // Camera ground footprint outline, closed rectangle
+  const mobileFootprintOutline = useMemo(() => {
+    const w = 0.22;
+    const h = 0.26;
+    const z = -0.5;
+    return new Float32Array([
+      -w, 0, z - h, w, 0, z - h,
+      w, 0, z - h, w, 0, z + h,
+      w, 0, z + h, -w, 0, z + h,
+      -w, 0, z + h, -w, 0, z - h,
+    ]);
+  }, []);
   const strobeTailRef = useRef<THREE.MeshBasicMaterial>(null!);
   const navRedRef = useRef<THREE.MeshBasicMaterial>(null!);
   const navGreenRef = useRef<THREE.MeshBasicMaterial>(null!);
@@ -50,6 +91,14 @@ export default function MobileDroneScout({
     { x: -0.95, z: -0.95, angle: (5 * Math.PI) / 4, dir: 1, isPort: false }, // Front-Right
     { x: 0.95, z: -0.95, angle: (7 * Math.PI) / 4, dir: -1, isPort: true }, // Front-Left
   ];
+
+  // Shared blade-blur disc for all four rotors (radial gradient + rotating streaks)
+  const rotorBlurMaterial = useMemo(
+    () => createDiscMaterial({ color: themeColor, intensity: 0.45, streaks: 4 }),
+    [themeColor]
+  );
+
+  useEffect(() => () => rotorBlurMaterial.dispose(), [rotorBlurMaterial]);
 
   useFrame((state, delta) => {
     const t = state.clock.getElapsedTime();
@@ -92,6 +141,9 @@ export default function MobileDroneScout({
       }
     });
 
+    // Keep the blade-blur streaks spinning on every rotor (one shared material)
+    tickDiscMaterial(rotorBlurMaterial, t);
+
     // 3. Sensor Gimbal Active Inspection Tracking
     if (sensorTurretRef.current) {
       const targetGimbalPitch = -0.35 + state.pointer.y * 0.3;
@@ -129,18 +181,63 @@ export default function MobileDroneScout({
       const isFlash = (cycle > 0.0 && cycle < 0.08) || (cycle > 0.16 && cycle < 0.24);
       strobeTailRef.current.opacity = isFlash ? 1.0 : 0.05;
     }
+
+    // 7. LiDAR scan pool on the ground: a circular spot that breathes
+    if (scanPoolRef.current) {
+      const pulse = 1 + Math.sin(t * 2.4) * 0.12;
+      scanPoolRef.current.scale.setScalar(pulse);
+      const mat = scanPoolRef.current.material as THREE.MeshBasicMaterial;
+      mat.opacity = 0.2 + Math.abs(Math.sin(t * 1.6)) * 0.16;
+    }
+
+    // 8. Survey execution: the aircraft sweeps the active swath and the covered
+    // ground behind it fills in — the same coverage-map read as the desktop unit.
+    if (surveyRef.current) {
+      const cyclePos = (t * 0.16) % 1;
+      const swathIndex = Math.min(
+        mobileSurvey.swaths.length - 1,
+        Math.floor(cyclePos * mobileSurvey.swaths.length)
+      );
+      const alongSwath = (cyclePos * mobileSurvey.swaths.length) % 1;
+      const swathX = mobileSurvey.swaths[swathIndex];
+      const swathZ =
+        -mobileSurvey.swathLength / 2 + alongSwath * mobileSurvey.swathLength;
+
+      surveyRef.current.position.x = swathX;
+      surveyRef.current.position.z = swathZ;
+
+      if (swathProgressRef.current) {
+        swathProgressRef.current.scale.z = Math.max(
+          0.001,
+          alongSwath * mobileSurvey.swathLength
+        );
+      }
+
+      // Photo stations brighten as they are covered
+      photoStationRefs.current.forEach((mesh, i) => {
+        if (!mesh) return;
+        const mat = mesh.material as THREE.MeshBasicMaterial;
+        const covered = alongSwath >= (i + 1) / 5;
+        mat.opacity = covered ? 0.75 : 0.2;
+      });
+
+      // Bank the airframe into the flight path
+      if (droneBodyRef.current) {
+        droneBodyRef.current.rotation.z = swathX * 0.14;
+      }
+    }
   });
 
   return (
     <group ref={rootGroupRef} position={position} scale={scale}>
-      {/* =========================================================================
-          HIGH-FIDELITY MOBILE STUDIO LIGHTING
-      ========================================================================= */}
-      <ambientLight intensity={1.4} />
-      <directionalLight position={[2, 5, 4]} intensity={5.5} color="#FFFFFF" />
-      <directionalLight position={[-3, -2, -2]} intensity={2.0} color="#FE6E00" />
-      <pointLight position={[0, 2.5, 2.0]} intensity={5.0} color="#FFFFFF" distance={10} />
-      <pointLight position={[0, -1.2, 1.2]} intensity={4.0} color={themeColor} distance={8} />
+      {/* Scene-wide Lighting.tsx carries the exposure; one accent light only — every
+          extra point light multiplies the per-fragment cost of the whole scene. */}
+      <pointLight
+        position={[0, -1.2, 1.2]}
+        intensity={4.0}
+        color={themeColor}
+        distance={8}
+      />
 
       {/* =========================================================================
           MAIN SCOUT DRONE CHASSIS & AVIONICS
@@ -188,25 +285,25 @@ export default function MobileDroneScout({
 
         {/* 5. Dual High-Precision RTK GNSS Antenna Masts */}
         <group position={[0.18, 0.22, 0.26]}>
-          <cylinderGeometry args={[0.045, 0.045, 0.08, 16]} />
+          <cylinderGeometry args={[0.045, 0.045, 0.08, 10]} />
           <meshStandardMaterial color="#2E2E2E" metalness={0.9} />
           <mesh position={[0, 0.045, 0]}>
-            <sphereGeometry args={[0.035, 12, 12]} />
+            <sphereGeometry args={[0.035, 8, 8]} />
             <meshBasicMaterial color={themeColor} />
           </mesh>
         </group>
         <group position={[-0.18, 0.22, 0.26]}>
-          <cylinderGeometry args={[0.045, 0.045, 0.08, 16]} />
+          <cylinderGeometry args={[0.045, 0.045, 0.08, 10]} />
           <meshStandardMaterial color="#2E2E2E" metalness={0.9} />
           <mesh position={[0, 0.045, 0]}>
-            <sphereGeometry args={[0.035, 12, 12]} />
+            <sphereGeometry args={[0.035, 8, 8]} />
             <meshBasicMaterial color={themeColor} />
           </mesh>
         </group>
 
         {/* 6. Forward Stereoscopic Optical Vision Eyes */}
         <mesh position={[0.18, 0.04, -0.53]}>
-          <cylinderGeometry args={[0.035, 0.035, 0.04, 16]} />
+          <cylinderGeometry args={[0.035, 0.035, 0.04, 10]} />
           <meshStandardMaterial color="#FE6E00" metalness={0.8} />
         </mesh>
         <mesh position={[0.18, 0.04, -0.55]} rotation={[Math.PI / 2, 0, 0]}>
@@ -215,7 +312,7 @@ export default function MobileDroneScout({
         </mesh>
 
         <mesh position={[-0.18, 0.04, -0.53]}>
-          <cylinderGeometry args={[0.035, 0.035, 0.04, 16]} />
+          <cylinderGeometry args={[0.035, 0.035, 0.04, 10]} />
           <meshStandardMaterial color="#FE6E00" metalness={0.8} />
         </mesh>
         <mesh position={[-0.18, 0.04, -0.55]} rotation={[Math.PI / 2, 0, 0]}>
@@ -257,7 +354,7 @@ export default function MobileDroneScout({
 
         {/* 8. Tail Anti-Collision Strobe Beacon */}
         <mesh position={[0, 0.08, 0.54]}>
-          <sphereGeometry args={[0.04, 12, 12]} />
+          <sphereGeometry args={[0.04, 8, 8]} />
           <meshBasicMaterial ref={strobeTailRef} color="#FFFFFF" transparent />
         </mesh>
 
@@ -279,7 +376,7 @@ export default function MobileDroneScout({
 
             {/* Brushless Motor Outrunner Can (Anodized Orange Base + Machined Top) */}
             <mesh position={[arm.x, 0.08, arm.z]}>
-              <cylinderGeometry args={[0.085, 0.085, 0.12, 16]} />
+              <cylinderGeometry args={[0.085, 0.085, 0.12, 10]} />
               <meshStandardMaterial
                 color="#FE6E00"
                 metalness={0.9}
@@ -289,13 +386,13 @@ export default function MobileDroneScout({
 
             {/* Internal Copper Coil Stator Accent Ring */}
             <mesh position={[arm.x, 0.04, arm.z]}>
-              <cylinderGeometry args={[0.095, 0.095, 0.04, 16]} />
+              <cylinderGeometry args={[0.095, 0.095, 0.04, 10]} />
               <meshStandardMaterial color="#242424" metalness={0.9} />
             </mesh>
 
             {/* FAA Navigation Wingtip LEDs */}
             <mesh position={[arm.x * 1.12, 0.06, arm.z * 1.12]}>
-              <sphereGeometry args={[0.025, 8, 8]} />
+              <sphereGeometry args={[0.025, 6, 6]} />
               <meshBasicMaterial
                 color={arm.isPort ? "#FF2A2A" : "#00E676"}
               />
@@ -333,15 +430,10 @@ export default function MobileDroneScout({
                 />
               </mesh>
 
-              {/* Rotor Tip Velocity Blur Disk with Glowing Edge */}
+              {/* Rotor Blade-Blur Field — radial disc with spinning streaks */}
               <mesh rotation={[Math.PI / 2, 0, 0]}>
-                <ringGeometry args={[0.66, 0.74, 24]} />
-                <meshBasicMaterial
-                  color={themeColor}
-                  transparent
-                  opacity={0.28}
-                  side={THREE.DoubleSide}
-                />
+                <circleGeometry args={[0.76, 22]} />
+                <primitive object={rotorBlurMaterial} attach="material" />
               </mesh>
             </group>
           </group>
@@ -351,13 +443,13 @@ export default function MobileDroneScout({
         <group ref={sensorTurretRef} position={[0, -0.16, -0.34]}>
           {/* Motorized Turret Base */}
           <mesh>
-            <cylinderGeometry args={[0.08, 0.08, 0.05, 16]} />
+            <cylinderGeometry args={[0.08, 0.08, 0.05, 10]} />
             <meshStandardMaterial color="#2E2E2E" metalness={0.9} />
           </mesh>
 
           {/* Gimbal Sphere Enclosure */}
           <mesh position={[0, -0.1, 0]}>
-            <sphereGeometry args={[0.11, 16, 16]} />
+            <sphereGeometry args={[0.11, 12, 12]} />
             <meshStandardMaterial
               color="#141414"
               metalness={0.85}
@@ -367,7 +459,7 @@ export default function MobileDroneScout({
 
           {/* Primary 4K Optical Inspection Lens */}
           <mesh position={[0.035, -0.1, -0.1]} rotation={[Math.PI / 2, 0, 0]}>
-            <cylinderGeometry args={[0.036, 0.036, 0.04, 16]} />
+            <cylinderGeometry args={[0.036, 0.036, 0.04, 10]} />
             <meshStandardMaterial color="#D95B28" metalness={0.9} />
           </mesh>
           <mesh position={[0.035, -0.1, -0.125]}>
@@ -377,7 +469,7 @@ export default function MobileDroneScout({
 
           {/* Secondary Thermal IR Aperture */}
           <mesh position={[-0.035, -0.1, -0.09]} rotation={[Math.PI / 2, 0, 0]}>
-            <cylinderGeometry args={[0.024, 0.024, 0.03, 16]} />
+            <cylinderGeometry args={[0.024, 0.024, 0.03, 10]} />
             <meshStandardMaterial color="#8A8A8A" metalness={0.9} />
           </mesh>
           <mesh position={[-0.035, -0.1, -0.11]}>
@@ -385,14 +477,17 @@ export default function MobileDroneScout({
             <meshBasicMaterial color={themeColor} />
           </mesh>
 
-          {/* Volumetric Holographic LiDAR Laser Cone */}
-          <mesh position={[0, -0.85, 0]} rotation={[Math.PI, 0, 0]}>
-            <coneGeometry args={[0.85, 1.45, 16, 2, true]} />
+          {/* LiDAR scan pool: circular ranging footprint, replacing the wireframe
+              cone that read as a technical mesh rather than hardware */}
+          <mesh ref={scanPoolRef} position={[0, -1.098, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+            <circleGeometry args={[0.26, 18]} />
             <meshBasicMaterial
               color={themeColor}
-              wireframe
               transparent
-              opacity={0.22}
+              opacity={0.28}
+              blending={THREE.AdditiveBlending}
+              side={THREE.DoubleSide}
+              depthWrite={false}
             />
           </mesh>
         </group>
@@ -404,7 +499,7 @@ export default function MobileDroneScout({
       {/* 1. Compass Azimuth Ring Surrounding the Scout */}
       <group ref={lidarRingsRef} position={[0, -0.08, 0]}>
         <mesh rotation={[Math.PI / 2, 0, 0]}>
-          <torusGeometry args={[1.75, 0.007, 6, 48]} />
+          <torusGeometry args={[1.75, 0.007, 5, 32]} />
           <meshBasicMaterial
             color={themeColor}
             transparent
@@ -425,7 +520,7 @@ export default function MobileDroneScout({
 
       {/* 2. Projected Ground Coordinate Ripple Rings */}
       <group ref={groundRingsRef} position={[0, -1.1, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-        <ringGeometry args={[0.75, 0.85, 32]} />
+        <ringGeometry args={[0.75, 0.85, 20]} />
         <meshBasicMaterial
           color={themeColor}
           transparent
@@ -434,7 +529,7 @@ export default function MobileDroneScout({
         />
       </group>
       <mesh position={[0, -1.1, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-        <ringGeometry args={[0.35, 0.42, 24]} />
+        <ringGeometry args={[0.35, 0.42, 16]} />
         <meshBasicMaterial
           color={themeColor}
           transparent
@@ -442,6 +537,70 @@ export default function MobileDroneScout({
           side={THREE.DoubleSide}
         />
       </mesh>
+
+      {/* 3. Survey coverage on the ground. The line grid is removed along with
+          the wireframe cone; the circular elements and the covered-swath strip
+          remain, so the mission still reads without a technical mesh. */}
+      <group ref={surveyRef} position={[0, -1.098, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+        {/* Covered ground behind the aircraft on the active swath */}
+        <mesh ref={swathProgressRef}>
+          <planeGeometry args={[0.42, 1]} />
+          <meshBasicMaterial
+            color="#00C758"
+            transparent
+            opacity={0.16}
+            blending={THREE.AdditiveBlending}
+            side={THREE.DoubleSide}
+            depthWrite={false}
+          />
+        </mesh>
+
+        {/* Camera image footprint on the ground */}
+        <lineSegments>
+          <bufferGeometry>
+            <bufferAttribute
+              attach="attributes-position"
+              args={[mobileFootprintOutline, 3]}
+            />
+          </bufferGeometry>
+          <lineBasicMaterial color="#38BDF8" transparent opacity={0.55} />
+        </lineSegments>
+
+        {/* Planned photo stations */}
+        {mobileSurvey.stations.map((s, i) => (
+          <mesh
+            key={`m-station-${i}`}
+            ref={(el) => {
+              photoStationRefs.current[i] = el as THREE.Mesh;
+            }}
+            position={[s.x, 0, s.z]}
+          >
+            <ringGeometry args={[0.03, 0.044, 10]} />
+            <meshBasicMaterial
+              color="#38BDF8"
+              transparent
+              opacity={0.4}
+              side={THREE.DoubleSide}
+            />
+          </mesh>
+        ))}
+      </group>
+
+      {/* 4. GNSS fix-quality rings around the aircraft */}
+      <group position={[0, 0.02, -0.45]}>
+        <mesh rotation={[Math.PI / 2, 0, 0]}>
+          <torusGeometry args={[0.26, 0.0035, 5, 20]} />
+          <meshBasicMaterial color="#00C758" transparent opacity={0.7} />
+        </mesh>
+        <mesh rotation={[Math.PI / 2, 0, 0]}>
+          <torusGeometry args={[0.4, 0.0035, 5, 20]} />
+          <meshBasicMaterial color="#00C758" transparent opacity={0.42} />
+        </mesh>
+        <mesh rotation={[Math.PI / 2, 0, 0]}>
+          <torusGeometry args={[0.54, 0.0035, 5, 20]} />
+          <meshBasicMaterial color="#00C758" transparent opacity={0.22} />
+        </mesh>
+      </group>
     </group>
   );
 }

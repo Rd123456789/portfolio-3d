@@ -68,10 +68,10 @@ export default function Particles({ count = 1200 }: { count?: number }) {
         />
       </bufferGeometry>
       <pointsMaterial
-        size={0.05}
+        size={0.035}
         vertexColors
         transparent
-        opacity={0.65}
+        opacity={0.6}
         blending={THREE.AdditiveBlending}
         depthWrite={false}
       />

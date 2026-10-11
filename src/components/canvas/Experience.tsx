@@ -17,6 +17,20 @@ interface ExperienceProps {
   activeProject?: Project | null;
 }
 
+const FRAME_FOV = 45;
+// Outer radius of the globe assembly at scale 1: the satellite's orbit ring
+// plus its deployed solar array span, so the wings clear the frame edge too.
+const GLOBE_OUTER_RADIUS = 1.72;
+
+// Half-extents of the camera frustum at the globe's staging depth, refreshed on
+// resize so framing is derived from the real viewport instead of magic numbers
+// that only happen to work at one aspect ratio.
+interface FrameMetrics {
+  halfW: number;
+  halfH: number;
+  aspect: number;
+}
+
 export default function Experience({
   onSelectProject,
   activeProject,
@@ -26,6 +40,7 @@ export default function Experience({
   const gridAssetRef = useRef<THREE.Group>(null!);
   const droneGroupRef = useRef<THREE.Group>(null!);
   const sceneRootRef = useRef<THREE.Group>(null!);
+  const frameRef = useRef<FrameMetrics>({ halfW: 3.7, halfH: 2.07, aspect: 1.78 });
 
   const [isMobile, setIsMobile] = useState(false);
 
@@ -37,6 +52,19 @@ export default function Experience({
     window.addEventListener("resize", handleResize);
     return () => window.removeEventListener("resize", handleResize);
   }, []);
+
+  // Measure the frustum at the camera's resting distance for the current breakpoint
+  useEffect(() => {
+    const measure = () => {
+      const distance = isMobile ? 5.5 : 5.0;
+      const halfH = Math.tan((FRAME_FOV * Math.PI) / 360) * distance;
+      const aspect = window.innerWidth / Math.max(1, window.innerHeight);
+      frameRef.current = { halfW: halfH * aspect, halfH, aspect };
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, [isMobile]);
 
   const scrollProgressRef = useRef(0);
   const worksVisRef = useRef(0);
@@ -134,17 +162,18 @@ export default function Experience({
       globeGroupRef.current.visible = worksVis < 0.12 && contactVis < 0.12;
 
       if (isMobile) {
-        // MOBILE FRAMING: Positioned at y: 1.55 in Hero so it crowns the mobile viewport above text
-        let targetGX = 0;
-        let targetGY = 1.55;
+        // MOBILE FRAMING: the hero card is full-bleed and translucent, so the globe
+        // ghosts behind it as a hologram instead of being cropped out of existence.
+        const targetGX = 0;
+        let targetGY = 0.12;
         let targetGZ = -0.6;
-        let targetGScale = 1.15;
+        let targetGScale = 1.02;
 
         if (p < 0.18) {
           const t = p / 0.18;
-          targetGY = THREE.MathUtils.lerp(1.55, 0.4, t);
+          targetGY = THREE.MathUtils.lerp(0.12, 0.4, t);
           targetGZ = THREE.MathUtils.lerp(-0.6, -4.0, t);
-          targetGScale = THREE.MathUtils.lerp(1.15, 0.9, t);
+          targetGScale = THREE.MathUtils.lerp(1.02, 0.9, t);
         } else {
           const t = Math.min(1, (p - 0.18) / 0.4);
           targetGY = THREE.MathUtils.lerp(0.4, -0.2, t);
@@ -179,18 +208,27 @@ export default function Experience({
           )
         );
       } else {
-        // DESKTOP FRAMING: Sits cleanly inside right half in Hero (x: 1.25), moves deep behind centered dossier in Section 2
-        let targetGX = 1.25;
+        // DESKTOP FRAMING: Sits cleanly inside the right half in Hero, then moves
+        // deep behind the centred dossier in Section 2. Both the offset and the
+        // scale are derived from the live frustum so the full assembly (satellite
+        // ring included) stays inside the frame on ultrawide, 16:9 and 4:3 alike.
+        const { halfW } = frameRef.current;
+        const heroGX = Math.min(1.25, halfW * 0.4);
+        // Widest scale whose outer ring still clears the right frame edge
+        const heroScaleFit = (halfW * 0.985 - heroGX) / GLOBE_OUTER_RADIUS;
+        const heroScale = THREE.MathUtils.clamp(heroScaleFit, 0.8, 1.65);
+
+        let targetGX = heroGX;
         let targetGY = -0.05;
         let targetGZ = 0;
-        let targetGScale = 1.65;
+        let targetGScale = heroScale;
 
         if (p < 0.25) {
           const t = p / 0.25;
-          targetGX = THREE.MathUtils.lerp(1.25, 0, t);
+          targetGX = THREE.MathUtils.lerp(heroGX, 0, t);
           targetGY = THREE.MathUtils.lerp(-0.05, 0, t);
           targetGZ = THREE.MathUtils.lerp(0, -6.0, t);
-          targetGScale = THREE.MathUtils.lerp(1.65, 0.95, t);
+          targetGScale = THREE.MathUtils.lerp(heroScale, 0.95, t);
         } else {
           const t = Math.min(1, (p - 0.25) / 0.4);
           targetGX = 0;
