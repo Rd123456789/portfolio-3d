@@ -155,6 +155,40 @@ export default function GridNetworkAsset({
     return new Float32Array(segments);
   }, []);
 
+  // Four tapered corner legs. A transmission tower is a braced frame whose
+  // stiffness lives in the corner members; without them the body reads as a
+  // sparse mesh rather than a structure.
+  const TOWER_LEGS = useMemo(() => {
+    const legs: {
+      position: THREE.Vector3;
+      quaternion: THREE.Quaternion;
+      length: number;
+    }[] = [];
+    for (let i = 0; i < 4; i++) {
+      const a = (i / 4) * Math.PI * 2 + Math.PI / 4;
+      const base = new THREE.Vector3(
+        Math.cos(a) * 0.62,
+        -0.95,
+        Math.sin(a) * 0.62
+      );
+      const top = new THREE.Vector3(
+        Math.cos(a) * 0.17,
+        0.92,
+        Math.sin(a) * 0.17
+      );
+      const dir = new THREE.Vector3().subVectors(top, base);
+      legs.push({
+        position: new THREE.Vector3().addVectors(base, top).multiplyScalar(0.5),
+        quaternion: new THREE.Quaternion().setFromUnitVectors(
+          new THREE.Vector3(0, 1, 0),
+          dir.clone().normalize()
+        ),
+        length: dir.length(),
+      });
+    }
+    return legs;
+  }, []);
+
   // Stay cables from the mast crown out to the pad perimeter
   const GUY_WIRES = [0.785, 2.356, 3.927, 5.498].map((a) => [
     0, 1.9, 0,
@@ -478,16 +512,21 @@ export default function GridNetworkAsset({
         />
       </mesh>
 
-      {/* 3. Middle Steel Truss Mast */}
-      <mesh position={[0, 0.6, 0]}>
-        <cylinderGeometry args={[0.18, 0.3, 1.2, 4]} />
-        <meshStandardMaterial
-          color="#FFB74D"
-          emissive="#A33D14"
-          emissiveIntensity={0.9}
-          wireframe
-        />
-      </mesh>
+      {/* 3. Four tapered corner legs, the primary structure of the tower */}
+      {TOWER_LEGS.map((leg, i) => (
+        <mesh
+          key={`leg-${i}`}
+          position={leg.position}
+          quaternion={leg.quaternion}
+        >
+          <cylinderGeometry args={[0.022, 0.03, leg.length, 4]} />
+          <meshStandardMaterial
+            color="#C98A3A"
+            metalness={0.85}
+            roughness={0.45}
+          />
+        </mesh>
+      ))}
 
       {/* X-bracing at each panel point, the load path of a real lattice tower */}
       <lineSegments>
