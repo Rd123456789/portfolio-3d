@@ -273,13 +273,13 @@ export default function Experience({
       const targetDroneY = isMobile
         ? THREE.MathUtils.lerp(2.5, 0.08, worksVis)
         : THREE.MathUtils.lerp(2.5, 0.02, worksVis);
-      const targetDroneX = isMobile ? 0 : 1.30;
+      const targetDroneX = isMobile ? 0 : 1.08;
       const targetDroneZ = isMobile
         ? THREE.MathUtils.lerp(-2.0, 0.45, worksVis)
-        : THREE.MathUtils.lerp(-2.0, 0.25, worksVis);
+        : THREE.MathUtils.lerp(-2.0, 0.18, worksVis);
       const targetDroneScale = isMobile
         ? THREE.MathUtils.lerp(0.2, 0.40, worksVis)
-        : THREE.MathUtils.lerp(0.2, 0.58, worksVis);
+        : THREE.MathUtils.lerp(0.2, 0.48, worksVis);
 
       droneGroupRef.current.position.y = THREE.MathUtils.damp(
         droneGroupRef.current.position.y,
@@ -313,9 +313,9 @@ export default function Experience({
     if (gridAssetRef.current) {
       gridAssetRef.current.visible = contactVis > 0.04;
 
-      const targetMastX = isMobile ? 0 : 2.45;
-      const targetMastY = THREE.MathUtils.lerp(-10.0, isMobile ? 0.70 : -0.45, contactVis);
-      const targetMastZ = THREE.MathUtils.lerp(-4.0, isMobile ? -0.75 : 0.35, contactVis);
+      const targetMastX = isMobile ? 0 : 1.32;
+      const targetMastY = THREE.MathUtils.lerp(-10.0, isMobile ? 0.70 : -0.42, contactVis);
+      const targetMastZ = THREE.MathUtils.lerp(-4.0, isMobile ? -0.75 : 0.2, contactVis);
 
       gridAssetRef.current.position.x = THREE.MathUtils.damp(
         gridAssetRef.current.position.x,
@@ -370,7 +370,7 @@ export default function Experience({
 
       {/* 3D ELECTRICAL GRID MAST */}
       <group ref={gridAssetRef} position={[2.2, -12, -4]} visible={false}>
-        <GridNetworkAsset scale={isMobile ? 0.75 : 0.9} />
+        <GridNetworkAsset scale={isMobile ? 0.72 : 0.84} />
       </group>
 
       {/* 3D AUTONOMOUS DRONE (MISSION CONTROL SECTION 03) */}

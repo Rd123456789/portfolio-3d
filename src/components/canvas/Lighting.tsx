@@ -5,26 +5,35 @@ import React from "react";
 export default function Lighting() {
   return (
     <>
-      {/* Soft Ambient Fill */}
-      <ambientLight intensity={0.8} />
+      {/* Studio Ambient Base */}
+      <ambientLight intensity={0.85} />
 
-      {/* Primary Key Directional Light (no shadow pass: nothing receives it) */}
-      <directionalLight position={[6, 9, 6]} intensity={2.4} />
+      {/* Sky-to-Ground Hemisphere Fill for metallic & carbon-composite surfaces */}
+      <hemisphereLight args={["#4A607A", "#181C24", 1.05]} />
 
-      {/* Signal Orange Industrial Rim Light (Left Lateral) */}
+      {/* Primary Studio Key Directional Light (Front-Right Elevated) */}
+      <directionalLight position={[6, 9, 8]} intensity={2.6} color="#FFF7ED" />
+
+      {/* Cool Telemetry Rim / Counter-Fill Directional Light */}
+      <directionalLight position={[-5, 4, 6]} intensity={1.15} color="#7DD3FC" />
+
+      {/* Back-Edge Silhouette Rim Light */}
+      <directionalLight position={[2, 5, -6]} intensity={0.9} color="#FE6E00" />
+
+      {/* Stage 1 (Hero / Globe) Warm Orbital Accent */}
       <pointLight
-        position={[-6, 2.5, -2]}
-        color="#FE6E00"
-        intensity={4.5}
-        distance={24}
+        position={[4, 2.0, 3]}
+        color="#FFB74D"
+        intensity={2.8}
+        distance={16}
       />
 
-      {/* Warm Gold Satellite Glint Light */}
+      {/* Stage 3 (Contact / Substation) Cool Cyan Busbar Fill */}
       <pointLight
-        position={[3, 5, 2]}
-        color="#FFB74D"
-        intensity={2.2}
-        distance={18}
+        position={[3.8, -12.5, 3]}
+        color="#38BDF8"
+        intensity={3.2}
+        distance={14}
       />
     </>
   );

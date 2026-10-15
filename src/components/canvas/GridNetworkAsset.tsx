@@ -1,40 +1,182 @@
 "use client";
 
-import React, { useRef, useMemo, useEffect } from "react";import { useFrame } from "@react-three/fiber";
+import React, { useRef, useMemo, useEffect } from "react";
+import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
-import { createDiscMaterial, createDotMatrixMaterial, syncDotMatrixScale } from "@/lib/shaders";
 
-// Three-phase circuit. A 220 kV double-circuit tower carries two independent
-// three-phase circuits on opposite sides of the crossarms, plus two earth
-// (shield) wires on the peak. Phases use the Indian standard colour code —
-// R, Y and B — which is what actually gets painted on the hardware.
-const PHASES = [
-  { phase: "R", color: "#E23B3B" }, // Red phase
-  { phase: "Y", color: "#E8B33A" }, // Yellow phase
-  { phase: "B", color: "#3B6FE2" }, // Blue phase
-];
+interface StrutSegment {
+  position: THREE.Vector3;
+  quaternion: THREE.Quaternion;
+  length: number;
+  radius: number;
+}
+
+const UP = new THREE.Vector3(0, 1, 0);
+
+function makeStrut(
+  a: THREE.Vector3,
+  b: THREE.Vector3,
+  radius: number
+): StrutSegment {
+  const dir = new THREE.Vector3().subVectors(b, a);
+  const length = dir.length();
+  const position = new THREE.Vector3().addVectors(a, b).multiplyScalar(0.5);
+  const quaternion = new THREE.Quaternion().setFromUnitVectors(
+    UP,
+    dir.clone().normalize()
+  );
+  return { position, quaternion, length, radius };
+}
 
 /**
- * Zigzag web members for a lattice cross-arm: alternating diagonals between the
- * upper and lower chords, with a vertical at every node. Returned as flat
- * line-segment vertices in the arm's local space.
+ * Generates mathematically exact node-to-node structural steel members and
+ * lattice bracing for a 6-tier 220kV double-circuit transmission tower.
  */
-function crossArmWeb(span: number): Float32Array {
-  const half = span / 2;
-  const dy = 0.085;
-  const segments = 8;
-  const step = span / segments;
-  const pts: number[] = [];
+function buildLatticeTowerGeometry() {
+  const tiers = [
+    { y: -1.22, w: 0.52 }, // Tier 0: Base on concrete footings
+    { y: -0.62, w: 0.38 }, // Tier 1: Lower body
+    { y: -0.05, w: 0.26 }, // Tier 2: Waist / bend line
+    { y: 0.48, w: 0.22 },  // Tier 3: Bottom crossarm level
+    { y: 0.96, w: 0.19 },  // Tier 4: Middle crossarm level
+    { y: 1.42, w: 0.16 },  // Tier 5: Top crossarm level
+    { y: 1.84, w: 0.02 },  // Tier 6: Pyramidal earth-wire peak
+  ];
 
-  for (let i = 0; i < segments; i++) {
-    const x0 = -half + i * step;
-    const x1 = x0 + step;
-    const rising = i % 2 === 0;
-    pts.push(x0, rising ? -dy : dy, 0, x1, rising ? dy : -dy, 0);
-    pts.push(x1, dy, 0, x1, -dy, 0);
+  const crossarms = [
+    {
+      tierIdx: 3,
+      y: 0.48,
+      spanHalf: 0.96,
+      baseW: 0.22,
+      height: 0.16,
+      phase: "B",
+      color: "#38BDF8",
+    },
+    {
+      tierIdx: 4,
+      y: 0.96,
+      spanHalf: 1.12,
+      baseW: 0.19,
+      height: 0.15,
+      phase: "Y",
+      color: "#FFB74D",
+    },
+    {
+      tierIdx: 5,
+      y: 1.42,
+      spanHalf: 0.86,
+      baseW: 0.16,
+      height: 0.14,
+      phase: "R",
+      color: "#FE6E00",
+    },
+  ];
+
+  const mainStruts: StrutSegment[] = [];
+  const braceLines: number[] = [];
+
+  const pushLine = (a: THREE.Vector3, b: THREE.Vector3) => {
+    braceLines.push(a.x, a.y, a.z, b.x, b.y, b.z);
+  };
+
+  const getCorners = (y: number, w: number): THREE.Vector3[] => [
+    new THREE.Vector3(-w, y, -w),
+    new THREE.Vector3(w, y, -w),
+    new THREE.Vector3(w, y, w),
+    new THREE.Vector3(-w, y, w),
+  ];
+
+  for (let t = 0; t < tiers.length - 1; t++) {
+    const bot = getCorners(tiers[t].y, tiers[t].w);
+    const top = getCorners(tiers[t + 1].y, tiers[t + 1].w);
+    const legRadius = t < 2 ? 0.022 : t < 5 ? 0.018 : 0.014;
+
+    for (let c = 0; c < 4; c++) {
+      const next = (c + 1) % 4;
+      mainStruts.push(makeStrut(bot[c], top[c], legRadius));
+      if (t < tiers.length - 2) {
+        mainStruts.push(makeStrut(top[c], top[next], 0.011));
+      }
+
+      const midL = new THREE.Vector3().lerpVectors(bot[c], top[c], 0.5);
+      const midR = new THREE.Vector3().lerpVectors(bot[next], top[next], 0.5);
+
+      pushLine(bot[c], midR);
+      pushLine(bot[next], midL);
+      pushLine(midL, midR);
+
+      pushLine(midL, top[next]);
+      pushLine(midR, top[c]);
+      pushLine(top[c], top[next]);
+    }
+
+    if (t < tiers.length - 2) {
+      pushLine(top[0], top[2]);
+      pushLine(top[1], top[3]);
+    }
   }
-  return new Float32Array(pts);
+
+  for (const arm of crossarms) {
+    const w = arm.baseW;
+    const y0 = arm.y;
+    const yTop = arm.y + arm.height;
+    const zHalf = w * 0.82;
+
+    for (const dir of [-1, 1]) {
+      const tipX = dir * arm.spanHalf;
+      const rootX = dir * w;
+
+      const rootFL = new THREE.Vector3(rootX, y0, zHalf);
+      const rootBL = new THREE.Vector3(rootX, y0, -zHalf);
+      const rootTopF = new THREE.Vector3(rootX * 0.9, yTop, zHalf * 0.75);
+      const rootTopB = new THREE.Vector3(rootX * 0.9, yTop, -zHalf * 0.75);
+
+      const tipF = new THREE.Vector3(tipX, y0, 0.035);
+      const tipB = new THREE.Vector3(tipX, y0, -0.035);
+      const tipTop = new THREE.Vector3(tipX * 0.96, y0 + 0.035, 0);
+
+      mainStruts.push(makeStrut(rootFL, tipF, 0.011));
+      mainStruts.push(makeStrut(rootBL, tipB, 0.011));
+      mainStruts.push(makeStrut(rootTopF, tipTop, 0.008));
+      mainStruts.push(makeStrut(rootTopB, tipTop, 0.008));
+
+      const segs = 4;
+      for (let s = 0; s < segs; s++) {
+        const u0 = s / segs;
+        const u1 = (s + 1) / segs;
+        const bF0 = new THREE.Vector3().lerpVectors(rootFL, tipF, u0);
+        const bF1 = new THREE.Vector3().lerpVectors(rootFL, tipF, u1);
+        const bB0 = new THREE.Vector3().lerpVectors(rootBL, tipB, u0);
+        const bB1 = new THREE.Vector3().lerpVectors(rootBL, tipB, u1);
+        const tF0 = new THREE.Vector3().lerpVectors(rootTopF, tipTop, u0);
+        const tF1 = new THREE.Vector3().lerpVectors(rootTopF, tipTop, u1);
+        const tB0 = new THREE.Vector3().lerpVectors(rootTopB, tipTop, u0);
+        const tB1 = new THREE.Vector3().lerpVectors(rootTopB, tipTop, u1);
+
+        pushLine(bF0, tF1);
+        pushLine(tF0, bF1);
+        pushLine(bB0, tB1);
+        pushLine(tB0, bB1);
+        pushLine(bF0, bB1);
+      }
+    }
+  }
+
+  return {
+    mainStruts,
+    bracePositions: new Float32Array(braceLines),
+    crossarms,
+    footingCorners: [
+      [-0.52, -0.52],
+      [0.52, -0.52],
+      [0.52, 0.52],
+      [-0.52, 0.52],
+    ] as [number, number][],
+  };
 }
+
+const PACKET_POS = new THREE.Vector3();
 
 export default function GridNetworkAsset({
   position = [0, 0, 0],
@@ -44,759 +186,692 @@ export default function GridNetworkAsset({
   scale?: number;
 }) {
   const rootRef = useRef<THREE.Group>(null!);
-  const padRef = useRef<THREE.Group>(null!);
-  const conductorsRef = useRef<THREE.Group>(null!);
-  const anemometerRef = useRef<THREE.Group>(null!);
-  const radarHeadRef = useRef<THREE.Group>(null!);
+  const radarDishRef = useRef<THREE.Group>(null!);
   const beaconRef = useRef<THREE.Mesh>(null!);
-  const coreRef = useRef<THREE.Mesh>(null!);
+  const yardRingRef = useRef<THREE.Group>(null!);
+  const pulseRefs = useRef<THREE.Mesh[]>([]);
+  const pulseTrailRefs = useRef<THREE.Mesh[]>([]);
+  const coronaArcRefs = useRef<THREE.Mesh[]>([]);
 
-  // One arc ref per insulator string (six suspension clusters)
-  const arcRefs = [
-    useRef<THREE.Mesh>(null!),
-    useRef<THREE.Mesh>(null!),
-    useRef<THREE.Mesh>(null!),
-    useRef<THREE.Mesh>(null!),
-    useRef<THREE.Mesh>(null!),
-    useRef<THREE.Mesh>(null!),
-  ];
+  const towerData = useMemo(() => buildLatticeTowerGeometry(), []);
 
-  // Two earth (shield) wires run along the tower peak, above the phase
-  // conductors, to intercept lightning strikes. They are continuous across the
-  // structure rather than terminating at it.
-  const SHIELD_WIRES = useMemo(() => {
-    const peakY = 1.32;
-    const specs = [
-      { x: -0.22, dir: -1, sag: 0.42, len: 3.4 },
-      { x: 0.22, dir: -1, sag: 0.42, len: 3.4 },
-    ];
-    return specs.map((s) => {
-      const start = new THREE.Vector3(s.x, peakY, 0);
-      const end = new THREE.Vector3(s.x, peakY, s.dir * s.len);
-      const mid = new THREE.Vector3()
-        .addVectors(start, end)
-        .multiplyScalar(0.5);
-      mid.y -= s.sag;
-      const curve = new THREE.QuadraticBezierCurve3(start, mid, end);
-      return {
-        geometry: new THREE.TubeGeometry(curve, 12, 0.005, 4, false),
-      };
-    });
-  }, []);
-
-  // Corona haze blooming off the reactor core
-  const coronaMaterial = useMemo(
-    () => createDiscMaterial({ color: "#FE6E00", intensity: 0.3 }),
-    []
-  );
-  useEffect(() => () => coronaMaterial.dispose(), [coronaMaterial]);
-
-  // High-voltage arc jitter — additive, single thin quad per string
-  const arcJitterMaterial = useMemo(
-    () =>
-      new THREE.MeshBasicMaterial({
-        color: "#FFFFFF",
-        transparent: true,
-        opacity: 0.35,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false,
-      }),
-    []
-  );
-  useEffect(() => () => arcJitterMaterial.dispose(), [arcJitterMaterial]);
-
-  // Ring-and-spoke survey pad drawn under the structure so it reads as a real
-  // installation standing on surveyed ground rather than floating in the void.
-  const PAD_RINGS = [0.45, 0.8, 1.15, 1.5, 1.85];
-  const PAD_SPOKES = 12;
-
-  // Span dimension ticks: end caps plus the span line between them
-  const SPAN_MARKER = useMemo(() => {
-    const half = 2.4;
-    const tick = 0.1;
-    return new Float32Array([
-      // Span line
-      -half, 0, 0, half, 0, 0,
-      // End caps
-      -half, -tick, 0, -half, tick, 0,
-      half, -tick, 0, half, tick, 0,
-    ]);
-  }, []);
-
-  // A 220 kV suspension string uses roughly a dozen cap-and-pin discs
-  const INSULATOR_DISCS = 12;
-
-  // Cross-bracing panels: transmission tower bodies are braced X-patterns at
-  // each panel point, not a plain tube. Generated across four faces.
-  const CROSS_BRACING = useMemo(() => {
-    const panels = [
-      { y0: -0.9, y1: -0.3, r0: 0.62, r1: 0.4 },
-      { y0: -0.3, y1: 0.25, r0: 0.4, r1: 0.26 },
-      { y0: 0.25, y1: 0.85, r0: 0.26, r1: 0.18 },
-    ];
-    const segments: number[] = [];
-    for (const p of panels) {
-      for (let face = 0; face < 4; face++) {
-        const a = (face / 4) * Math.PI * 2 + Math.PI / 4;
-        const aNext = ((face + 1) / 4) * Math.PI * 2 + Math.PI / 4;
-
-        const bl = [Math.cos(a) * p.r0, p.y0, Math.sin(a) * p.r0];
-        const br = [Math.cos(aNext) * p.r0, p.y0, Math.sin(aNext) * p.r0];
-        const tl = [Math.cos(a) * p.r1, p.y1, Math.sin(a) * p.r1];
-        const tr = [Math.cos(aNext) * p.r1, p.y1, Math.sin(aNext) * p.r1];
-
-        // Two diagonals forming the X in this panel
-        segments.push(...bl, ...tr);
-        segments.push(...br, ...tl);
-        // Horizontal strut at the panel point
-        segments.push(...bl, ...br);
-      }
+  const yardGridLines = useMemo(() => {
+    const pts: number[] = [];
+    const halfW = 1.26;
+    const halfD = 1.06;
+    for (let i = -4; i <= 4; i++) {
+      const x = (i / 4) * halfW;
+      pts.push(x, 0, -halfD, x, 0, halfD);
     }
-    return new Float32Array(segments);
+    for (let j = -4; j <= 4; j++) {
+      const z = (j / 4) * halfD;
+      pts.push(-halfW, 0, z, halfW, 0, z);
+    }
+    return new Float32Array(pts);
   }, []);
 
-  // Four tapered corner legs. A transmission tower is a braced frame whose
-  // stiffness lives in the corner members; without them the body reads as a
-  // sparse mesh rather than a structure.
-  const TOWER_LEGS = useMemo(() => {
-    const legs: {
-      position: THREE.Vector3;
-      quaternion: THREE.Quaternion;
-      length: number;
+  const { conductorLines, insulatorClusters } = useMemo(() => {
+    const clusters: {
+      x: number;
+      y: number;
+      color: string;
+      phase: string;
+      side: number;
     }[] = [];
-    for (let i = 0; i < 4; i++) {
-      const a = (i / 4) * Math.PI * 2 + Math.PI / 4;
-      const base = new THREE.Vector3(
-        Math.cos(a) * 0.62,
-        -0.95,
-        Math.sin(a) * 0.62
-      );
-      const top = new THREE.Vector3(
-        Math.cos(a) * 0.17,
-        0.92,
-        Math.sin(a) * 0.17
-      );
-      const dir = new THREE.Vector3().subVectors(top, base);
-      legs.push({
-        position: new THREE.Vector3().addVectors(base, top).multiplyScalar(0.5),
-        quaternion: new THREE.Quaternion().setFromUnitVectors(
-          new THREE.Vector3(0, 1, 0),
-          dir.clone().normalize()
-        ),
-        length: dir.length(),
-      });
-    }
-    return legs;
-  }, []);
 
-  // Stay cables from the mast crown out to the pad perimeter
-  const GUY_WIRES = [0.785, 2.356, 3.927, 5.498].map((a) => [
-    0, 1.9, 0,
-    Math.cos(a) * 1.8, -1.28, Math.sin(a) * 1.8,
-  ]);
+    const curves: {
+      id: string;
+      curve: THREE.QuadraticBezierCurve3;
+      color: string;
+      speed: number;
+      geometry: THREE.TubeGeometry;
+    }[] = [];
 
-  const CONDUCTORS = useMemo(() => {
-    const anchorY = 0.55;
-    // Two circuits: the left-hand circuit occupies the far arm, the right-hand
-    // circuit the near arm. Within each circuit the three phases sit at the
-    // outer, middle and inner positions.
-    const specs = [
-      // Circuit A (rear)
-      { x: -0.9, dir: -1, sag: 0.32, len: 3.2, phase: "B" },
-      { x: -0.6, dir: -1, sag: 0.28, len: 3.0, phase: "Y" },
-      { x: -0.3, dir: -1, sag: 0.28, len: 3.0, phase: "R" },
-      // Circuit B (front)
-      { x: 0.3, dir: 1, sag: 0.28, len: 3.0, phase: "R" },
-      { x: 0.6, dir: 1, sag: 0.28, len: 3.0, phase: "Y" },
-      { x: 0.9, dir: 1, sag: 0.32, len: 3.2, phase: "B" },
-    ];
+    towerData.crossarms.forEach((arm, idx) => {
+      for (const side of [-1, 1]) {
+        const x = side * arm.spanHalf;
+        const y = arm.y;
+        clusters.push({ x, y, color: arm.color, phase: arm.phase, side });
 
-    const phaseColor = (p: string) =>
-      PHASES.find((ph) => ph.phase === p)?.color ?? "#FE6E00";
+        const clampPos = new THREE.Vector3(x, y - 0.22, 0);
 
-    return specs.map((s, i) => {
-      const start = new THREE.Vector3(s.x, anchorY, 0.12);
-      const end = new THREE.Vector3(s.x, anchorY, s.dir * s.len);
-      const mid = new THREE.Vector3()
-        .addVectors(start, end)
-        .multiplyScalar(0.5);
-      mid.y -= s.sag;
-      // Gentle lateral drift over the run so the corridor does not look ruled
-      mid.x += (i % 2 === 0 ? 0.12 : -0.12) * s.dir;
-      const curve = new THREE.QuadraticBezierCurve3(start, mid, end);
-      return {
-        id: `conductor-${i}`,
-        curve,
-        phase: s.phase,
-        color: phaseColor(s.phase),
-        geometry: new THREE.TubeGeometry(curve, 12, 0.008, 4, false),
-      };
+        // Span A: Catenary outgoing transmission line (-Z corridor)
+        const farEnd = new THREE.Vector3(x * 1.08, y - 0.12, -2.1);
+        const farMid = clampPos.clone().add(farEnd).multiplyScalar(0.5);
+        farMid.y -= 0.24;
+        const farCurve = new THREE.QuadraticBezierCurve3(
+          clampPos,
+          farMid,
+          farEnd
+        );
+        curves.push({
+          id: `span-rear-${idx}-${side}`,
+          curve: farCurve,
+          color: arm.color,
+          speed: 0.48 + idx * 0.07,
+          geometry: new THREE.TubeGeometry(farCurve, 20, 0.0065, 6, false),
+        });
+
+        if (side === -1) {
+          // Left Circuit (-X) drops down into the 3 HV Transformer Bushings
+          const bushingX = -0.82 + (idx - 1) * 0.14;
+          const bushingPos = new THREE.Vector3(bushingX, -0.52, 0.42);
+          const dropMid = new THREE.Vector3(
+            (x + bushingX) * 0.5 - 0.08,
+            (clampPos.y + bushingPos.y) * 0.5 - 0.1,
+            0.24
+          );
+          const dropCurve = new THREE.QuadraticBezierCurve3(
+            clampPos,
+            dropMid,
+            bushingPos
+          );
+          curves.push({
+            id: `drop-xfmr-${idx}`,
+            curve: dropCurve,
+            color: arm.color,
+            speed: 0.62 + idx * 0.08,
+            geometry: new THREE.TubeGeometry(dropCurve, 20, 0.0065, 6, false),
+          });
+        } else {
+          // Right Circuit (+X) continues forward along the transmission corridor (+Z)
+          const nearEnd = new THREE.Vector3(x * 1.08, y - 0.12, 2.0);
+          const nearMid = clampPos.clone().add(nearEnd).multiplyScalar(0.5);
+          nearMid.y -= 0.22;
+          const nearCurve = new THREE.QuadraticBezierCurve3(
+            clampPos,
+            nearMid,
+            nearEnd
+          );
+          curves.push({
+            id: `span-front-${idx}`,
+            curve: nearCurve,
+            color: arm.color,
+            speed: 0.52 + idx * 0.06,
+            geometry: new THREE.TubeGeometry(nearCurve, 20, 0.0065, 6, false),
+          });
+        }
+      }
     });
-  }, []);
 
-  // Travelling current pulse: one points draw call for every conductor, tinted
-  // by that conductor's phase so the pulse on a red phase reads red.
-  const pulsePositions = useMemo(
-    () => new Float32Array(CONDUCTORS.length * 3),
-    [CONDUCTORS]
-  );
-  const pulseColors = useMemo(() => {
-    const arr = new Float32Array(CONDUCTORS.length * 3);
-    const c = new THREE.Color();
-    CONDUCTORS.forEach((cond, i) => {
-      c.set(cond.color);
-      // Brighten toward white so the pulse stands out from the conductor itself
-      arr[i * 3] = c.r + (1 - c.r) * 0.45;
-      arr[i * 3 + 1] = c.g + (1 - c.g) * 0.45;
-      arr[i * 3 + 2] = c.b + (1 - c.b) * 0.45;
+    // Overhead OPGW Optical Ground Wire from the tower peak (y = 1.84)
+    const peakStart = new THREE.Vector3(0, 1.84, 0);
+    const peakEndRear = new THREE.Vector3(0, 1.72, -2.1);
+    const peakMidRear = new THREE.Vector3(0, 1.62, -1.05);
+    const opgwCurve = new THREE.QuadraticBezierCurve3(
+      peakStart,
+      peakMidRear,
+      peakEndRear
+    );
+    curves.push({
+      id: "opgw-shield",
+      curve: opgwCurve,
+      color: "#E2E8F0",
+      speed: 0.85,
+      geometry: new THREE.TubeGeometry(opgwCurve, 18, 0.0045, 5, false),
     });
-    return arr;
-  }, [CONDUCTORS]);
-  const pulseGeometryRef = useRef<THREE.BufferGeometry>(null!);
-  const pulseMaterial = useMemo(
-    () => createDotMatrixMaterial({ size: 0.055, opacity: 1, nightDim: 1 }),
-    []
-  );
-  const PULSE_POSITION = useMemo(() => new THREE.Vector3(), []);
+
+    return { conductorLines: curves, insulatorClusters: clusters };
+  }, [towerData]);
 
   useEffect(
     () => () => {
-      CONDUCTORS.forEach((c) => c.geometry.dispose());
-      SHIELD_WIRES.forEach((w) => w.geometry.dispose());
-      pulseMaterial.dispose();
+      conductorLines.forEach((c) => c.geometry.dispose());
     },
-    [CONDUCTORS, SHIELD_WIRES, pulseMaterial]
+    [conductorLines]
   );
 
   useFrame((state, delta) => {
     const t = state.clock.getElapsedTime();
 
-    // Constant slow orientation drift
     if (rootRef.current) {
-      rootRef.current.rotation.y += delta * 0.12;
+      const targetRotY =
+        -0.42 + Math.sin(t * 0.28) * 0.14 + state.pointer.x * 0.22;
+      const targetRotX = 0.22 - state.pointer.y * 0.1;
+      rootRef.current.rotation.y = THREE.MathUtils.damp(
+        rootRef.current.rotation.y,
+        targetRotY,
+        4,
+        delta
+      );
+      rootRef.current.rotation.x = THREE.MathUtils.damp(
+        rootRef.current.rotation.x,
+        targetRotX,
+        4,
+        delta
+      );
     }
 
-    // Rotating 360 degree LIDAR / telemetry sensor head
-    if (radarHeadRef.current) {
-      radarHeadRef.current.rotation.y += delta * 1.8;
+    if (radarDishRef.current) {
+      radarDishRef.current.rotation.y = t * 1.6;
     }
 
-    // Warning strobe beacon + reactor core driven by emissive intensity, not lights
+    if (yardRingRef.current) {
+      yardRingRef.current.rotation.z = -t * 0.12;
+    }
+
     if (beaconRef.current) {
-      const strobe = Math.sin(t * 8) > 0.6 ? 6.0 : 0.4;
-      (beaconRef.current.material as THREE.MeshStandardMaterial).emissiveIntensity = strobe;
+      const flash = Math.sin(t * 6.5) > 0.25 ? 6.0 : 0.8;
+      (
+        beaconRef.current.material as THREE.MeshStandardMaterial
+      ).emissiveIntensity = flash;
     }
 
-    if (coreRef.current) {
-      (coreRef.current.material as THREE.MeshStandardMaterial).emissiveIntensity =
-        3.5 + Math.sin(t * 12) * 1.6;
-    }
-
-    // Insulator arcs crackle on independent, unsynchronised phases
-    arcRefs.forEach((ref, i) => {
-      if (!ref.current) return;
-      const phase = t * 9 + i * 2.3;
-      const crackle = Math.sin(phase) * Math.sin(phase * 2.7);
-      ref.current.visible = crackle > 0.55;
-      ref.current.scale.y = 0.6 + crackle * 1.1;
-      ref.current.rotation.z = Math.sin(phase * 1.3) * 0.4;
+    // Flickering high-voltage corona discharge along insulator strings
+    coronaArcRefs.current.forEach((arc, i) => {
+      if (!arc) return;
+      const p = t * 8.5 + i * 2.1;
+      const active = Math.sin(p) * Math.cos(p * 2.3) > 0.45;
+      arc.visible = active;
+      arc.rotation.y = p;
     });
 
-    // Survey pad counter-rotates slowly for a live, surveyed feel
-    if (padRef.current) {
-      padRef.current.rotation.z -= delta * 0.08;
-    }
-
-    // Anemometer spins with the prevailing wind
-    if (anemometerRef.current) {
-      anemometerRef.current.rotation.y += delta * 2.4;
-    }
-
-    // Corona discharges brightest when the plasma core peaks
-    if (coreRef.current && coronaMaterial.uniforms?.uIntensity) {
-      const pulse = 0.5 + Math.abs(Math.sin(t * 12)) * 0.5;
-      coronaMaterial.uniforms.uIntensity.value = 0.25 + pulse * 0.5;
-    }
-
-    // Push the current pulse along each conductor
-    for (let i = 0; i < CONDUCTORS.length; i++) {
-      const u = (t * (0.12 + i * 0.02) + i * 0.17) % 1;
-      CONDUCTORS[i].curve.getPoint(u, PULSE_POSITION);
-      pulsePositions[i * 3] = PULSE_POSITION.x;
-      pulsePositions[i * 3 + 1] = PULSE_POSITION.y;
-      pulsePositions[i * 3 + 2] = PULSE_POSITION.z;
-    }
-    if (pulseGeometryRef.current) {
-      (pulseGeometryRef.current.attributes.position as THREE.BufferAttribute).needsUpdate = true;
-    }
-    syncDotMatrixScale(pulseMaterial, state.size.height, state.viewport.dpr);
+    conductorLines.forEach((line, li) => {
+      const u = (t * line.speed + li * 0.19) % 1;
+      const pkt = pulseRefs.current[li];
+      if (pkt) {
+        line.curve.getPoint(u, PACKET_POS);
+        pkt.position.copy(PACKET_POS);
+      }
+      const trail = pulseTrailRefs.current[li];
+      if (trail) {
+        line.curve.getPoint((u - 0.05 + 1) % 1, PACKET_POS);
+        trail.position.copy(PACKET_POS);
+      }
+    });
   });
 
   return (
-    <group ref={rootRef} position={position} scale={scale}>
-      <group ref={padRef} position={[0, -1.29, 0]} rotation={[Math.PI / 2, 0, 0]}>
-        {PAD_RINGS.map((r, i) => (
-          <mesh key={`ring-${i}`}>
-            <torusGeometry args={[r, i % 2 === 0 ? 0.006 : 0.003, 4, 64]} />
-            <meshBasicMaterial
-              color="#FFB74D"
-              transparent
-              opacity={i % 2 === 0 ? 0.4 : 0.2}
-              blending={THREE.AdditiveBlending}
-              depthWrite={false}
-            />
-          </mesh>
-        ))}
-        {Array.from({ length: PAD_SPOKES }, (_, s) => {
-          const a = (s / PAD_SPOKES) * Math.PI * 2;
-          return (
-            <mesh
-              key={`spoke-${s}`}
-              position={[Math.cos(a) * 0.925, Math.sin(a) * 0.925, 0]}
-              rotation={[0, 0, a]}
-            >
-              <boxGeometry args={[1.85, 0.004, 0.004]} />
-              <meshBasicMaterial
-                color="#FFB74D"
-                transparent
-                opacity={0.14}
-                blending={THREE.AdditiveBlending}
-                depthWrite={false}
-              />
-            </mesh>
-          );
-        })}
+    <group
+      ref={rootRef}
+      position={position}
+      scale={scale}
+      rotation={[0.22, -0.42, 0]}
+    >
+      <pointLight
+        position={[-1.2, 0.8, 1.6]}
+        intensity={4.2}
+        color="#FE6E00"
+        distance={9}
+      />
 
-        {/* Corner survey markers at the pad perimeter */}
-        {Array.from({ length: 4 }, (_, k) => {
-          const a = (k / 4) * Math.PI * 2 + Math.PI / 4;
-          return (
-            <mesh
-              key={`corner-${k}`}
-              position={[Math.cos(a) * 1.85, Math.sin(a) * 1.85, 0]}
-            >
-              <boxGeometry args={[0.09, 0.09, 0.012]} />
-              <meshBasicMaterial
-                color="#FE6E00"
-                transparent
-                opacity={0.55}
-                blending={THREE.AdditiveBlending}
-                depthWrite={false}
-              />
-            </mesh>
-          );
-        })}
-      </group>
-
-      {/* 1. Substation Concrete Foundation Base */}
-      <mesh position={[0, -1.2, 0]}>
-        <cylinderGeometry args={[1.1, 1.3, 0.25, 8]} />
-        <meshStandardMaterial
-          color="#1A1A1A"
-          metalness={0.8}
-          roughness={0.4}
-        />
-      </mesh>
-
-      {/* Independent concrete footings, one under each leg, with the steel stub
-          angle cast into the concrete and bolted to the leg above it. */}
-      {[0.785, 2.356, 3.927, 5.498].map((a, i) => (
-        <group key={`footing-${i}`} position={[Math.cos(a) * 1.02, -1.26, Math.sin(a) * 1.02]}>
-          <mesh>
-            <boxGeometry args={[0.3, 0.14, 0.3]} />
-            <meshStandardMaterial
-              color="#242424"
-              metalness={0.4}
-              roughness={0.7}
-            />
-          </mesh>
-          {/* Stub angle rising out of the concrete into the leg */}
-          <mesh position={[0, 0.13, 0]}>
-            <boxGeometry args={[0.07, 0.14, 0.07]} />
-            <meshStandardMaterial color="#8A8A8A" metalness={0.9} roughness={0.4} />
-          </mesh>
-          {/* Holding-down bolts */}
-          {[
-            [-0.09, -0.09],
-            [0.09, -0.09],
-            [-0.09, 0.09],
-            [0.09, 0.09],
-          ].map(([bx, bz], b) => (
-            <mesh key={`bolt-${b}`} position={[bx, 0.11, bz]}>
-              <cylinderGeometry args={[0.008, 0.008, 0.1, 5]} />
-              <meshStandardMaterial color="#C9C9C9" metalness={0.95} roughness={0.25} />
-            </mesh>
-          ))}
-        </group>
-      ))}
-
-      {/* Guy wires anchoring the mast to the survey pad corners */}
-      {GUY_WIRES.map((w, i) => (
-        <line key={`guy-${i}`}>
-          <bufferGeometry>
-            <bufferAttribute
-              attach="attributes-position"
-              args={[new Float32Array(w), 3]}
-            />
-          </bufferGeometry>
-          <lineBasicMaterial
-            color="#FE6E00"
-            transparent
-            opacity={0.3}
-          />
-        </line>
-      ))}
-
-      {/* 1b. RTU control cabinet with a live status display */}
-      <group position={[-0.85, -1.02, 0.55]}>
-        <mesh>
-          <boxGeometry args={[0.34, 0.5, 0.22]} />
+      {/* =====================================================================
+          1. ARCHITECTURAL SUBSTATION PLINTH & EARTHING GRID DECK
+      ===================================================================== */}
+      <group position={[0, -1.32, 0]}>
+        <mesh position={[0, -0.08, 0]}>
+          <boxGeometry args={[2.76, 0.16, 2.36]} />
           <meshStandardMaterial
-            color="#242424"
-            metalness={0.7}
-            roughness={0.4}
+            color="#10151E"
+            metalness={0.75}
+            roughness={0.35}
           />
         </mesh>
-        {/* Status readout */}
-        <mesh position={[0, 0.13, 0.115]}>
-          <boxGeometry args={[0.22, 0.09, 0.01]} />
+
+        <mesh position={[0, 0.01, 0]}>
+          <boxGeometry args={[2.58, 0.04, 2.18]} />
           <meshStandardMaterial
-            color="#00C758"
-            emissive="#00C758"
-            emissiveIntensity={4}
+            color="#18202C"
+            metalness={0.55}
+            roughness={0.5}
           />
         </mesh>
-        {/* Ventilation slats */}
-        {[0, 1, 2].map((v) => (
-          <mesh key={v} position={[0, -0.02 - v * 0.055, 0.115]}>
-            <boxGeometry args={[0.26, 0.016, 0.01]} />
-            <meshStandardMaterial color="#141414" metalness={0.8} />
-          </mesh>
-        ))}
-      </group>
 
-      {/* Weather station: anemometer cups spinning with the wind */}
-      <group position={[0.42, 1.98, 0]}>
-        <mesh position={[0, 0.14, 0]}>
-          <cylinderGeometry args={[0.004, 0.004, 0.3, 4]} />
-          <meshStandardMaterial color="#8A8A8A" metalness={0.9} />
+        {/* Luminous Perimeter Safety Curbing */}
+        <mesh position={[0, 0.035, 1.09]}>
+          <boxGeometry args={[2.58, 0.016, 0.02]} />
+          <meshBasicMaterial color="#FE6E00" />
         </mesh>
-        <group ref={anemometerRef} position={[0, 0.3, 0]}>
-          {[0, 2.09, 4.19].map((a, i) => (
-            <group key={i} rotation={[0, a, 0]}>
-              <mesh position={[0.05, 0, 0]}>
-                <cylinderGeometry args={[0.002, 0.002, 0.07, 4]} />
-                <meshStandardMaterial color="#C9A227" metalness={0.9} />
-              </mesh>
-              <mesh position={[0.09, 0, 0]}>
-                <sphereGeometry args={[0.018, 8, 8]} />
-                <meshStandardMaterial
-                  color="#D6D6D6"
-                  metalness={0.9}
-                  roughness={0.2}
-                />
-              </mesh>
-            </group>
-          ))}
-        </group>
-      </group>
-
-      {/* 2. Lower Steel Truss Mast (Pyramidal 4-leg lattice) */}
-      <mesh position={[0, -0.4, 0]}>
-        <cylinderGeometry args={[0.3, 0.7, 1.4, 4]} />
-        <meshStandardMaterial
-          color="#FE6E00"
-          emissive="#7A2B0E"
-          emissiveIntensity={0.8}
-          wireframe
-        />
-      </mesh>
-
-      {/* 3. Four tapered corner legs, the primary structure of the tower */}
-      {TOWER_LEGS.map((leg, i) => (
-        <mesh
-          key={`leg-${i}`}
-          position={leg.position}
-          quaternion={leg.quaternion}
-        >
-          <cylinderGeometry args={[0.022, 0.03, leg.length, 4]} />
-          <meshStandardMaterial
-            color="#C98A3A"
-            metalness={0.85}
-            roughness={0.45}
-          />
+        <mesh position={[0, 0.035, -1.09]}>
+          <boxGeometry args={[2.58, 0.016, 0.02]} />
+          <meshBasicMaterial color="#FE6E00" />
         </mesh>
-      ))}
+        <mesh position={[-1.29, 0.035, 0]}>
+          <boxGeometry args={[0.02, 0.016, 2.18]} />
+          <meshBasicMaterial color="#38BDF8" transparent opacity={0.75} />
+        </mesh>
+        <mesh position={[1.29, 0.035, 0]}>
+          <boxGeometry args={[0.02, 0.016, 2.18]} />
+          <meshBasicMaterial color="#38BDF8" transparent opacity={0.75} />
+        </mesh>
 
-      {/* X-bracing at each panel point, the load path of a real lattice tower */}
-      <lineSegments>
-        <bufferGeometry>
-          <bufferAttribute
-            attach="attributes-position"
-            args={[CROSS_BRACING, 3]}
-          />
-        </bufferGeometry>
-        <lineBasicMaterial color="#FFB74D" transparent opacity={0.85} />
-      </lineSegments>
-
-      {/* 4. Cross-arms. Two chord tubes per arm with zigzag bracing between them,
-          the way a real lattice cross-arm is built, instead of a bare cylinder. */}
-      {[
-        { y: 1.1, span: 1.8, chord: 0.016 },
-        { y: 0.7, span: 2.2, chord: 0.014 },
-      ].map((arm, ai) => (
-        <group key={`arm-${ai}`} position={[0, arm.y, 0]}>
-          {/* Upper and lower chords */}
-          {[0.085, -0.085].map((dy, ci) => (
-            <mesh key={ci} position={[0, dy, 0]} rotation={[0, 0, Math.PI / 2]}>
-              <cylinderGeometry args={[arm.chord, arm.chord, arm.span, 6]} />
-              <meshStandardMaterial color="#C9C9C9" metalness={0.9} roughness={0.3} />
-            </mesh>
-          ))}
-          {/* Zigzag web members between the chords */}
+        {/* Inlaid Copper/Cyan Earthing Grid Mesh */}
+        <group position={[0, 0.033, 0]}>
           <lineSegments>
             <bufferGeometry>
               <bufferAttribute
                 attach="attributes-position"
-                args={[crossArmWeb(arm.span), 3]}
+                args={[yardGridLines, 3]}
               />
             </bufferGeometry>
-            <lineBasicMaterial color="#FFB74D" transparent opacity={0.9} />
-          </lineSegments>
-        </group>
-      ))}
-
-      {/* 5. Suspension insulator strings. Cap-and-pin discs spaced so the gaps
-          between them stay open — packed any tighter they fuse into one ribbed
-          column and stop reading as a string of discs. */}
-      {[-0.9, -0.6, -0.3, 0.3, 0.6, 0.9].map((xOffset, i) => (
-        <group key={i} position={[xOffset, 0.55, 0]}>
-          {Array.from({ length: INSULATOR_DISCS }, (_, d) => (
-            <mesh key={d} position={[0, 0.09 - d * 0.03, 0]}>
-              <cylinderGeometry args={[0.05, 0.038, 0.009, 10]} />
-              <meshStandardMaterial
-                color="#D9D2C6"
-                emissive="#FE6E00"
-                emissiveIntensity={0.5}
-                metalness={0.35}
-                roughness={0.55}
-              />
-            </mesh>
-          ))}
-          {/* Conductor cable terminal clamp, at the foot of the string */}
-          <mesh position={[0, -0.28, 0]}>
-            <sphereGeometry args={[0.025, 6, 6]} />
-            <meshBasicMaterial color="#FFFFFF" />
-          </mesh>
-
-          {/* Corona ring: fitted around the clamp to grade the electric field at
-              the conductor termination, which is why real hardware has them. */}
-          <mesh position={[0, -0.28, 0]} rotation={[Math.PI / 2, 0, 0]}>
-            <torusGeometry args={[0.055, 0.008, 5, 16]} />
-            <meshStandardMaterial color="#C9C9C9" metalness={0.9} roughness={0.3} />
-          </mesh>
-
-          {/* Arc leaping across the full disc string */}
-          <mesh ref={arcRefs[i]} position={[0, -0.1, 0]}>
-            <cylinderGeometry args={[0.0045, 0.0045, 0.36, 4]} />
-            <primitive object={arcJitterMaterial} attach="material" />
-          </mesh>
-        </group>
-      ))}
-
-      {/* High-voltage transmission conductors: real catenary sag out to the
-          horizon in both directions, coloured by phase. */}
-      <group ref={conductorsRef}>
-        {CONDUCTORS.map((c) => (
-          <mesh key={c.id} geometry={c.geometry}>
-            <meshBasicMaterial
-              color={c.color}
+            <lineBasicMaterial
+              color="#38BDF8"
               transparent
-              opacity={0.62}
+              opacity={0.22}
               blending={THREE.AdditiveBlending}
               depthWrite={false}
             />
-          </mesh>
-        ))}
+          </lineSegments>
+        </group>
 
-        {/* Travelling current pulses riding the conductors */}
-        <points material={pulseMaterial}>
-          <bufferGeometry ref={pulseGeometryRef}>
-            <bufferAttribute
-              attach="attributes-position"
-              args={[pulsePositions, 3]}
-            />
-            <bufferAttribute
-              attach="attributes-color"
-              args={[pulseColors, 3]}
-            />
-          </bufferGeometry>
-        </points>
-      </group>
-
-      {/* Rotating Corona Discharge Ring */}
-      <mesh position={[0, 1.45, 0]} rotation={[Math.PI / 2, 0, 0]}>
-        <torusGeometry args={[0.35, 0.015, 6, 18]} />
-        <meshStandardMaterial
-          color="#FE6E00"
-          emissive="#FE6E00"
-          emissiveIntensity={3}
-          wireframe
-        />
-      </mesh>
-
-      {/* 6. High-Voltage Plasma Reactor Core (emissive pulse replaces the point light) */}
-      <mesh ref={coreRef} position={[0, 1.45, 0]}>
-        <octahedronGeometry args={[0.18, 0]} />
-        <meshStandardMaterial
-          color="#FE6E00"
-          emissive="#FE6E00"
-          emissiveIntensity={3.5}
-        />
-      </mesh>
-
-      {/* Corona haze blooming off the reactor core */}
-      <mesh position={[0, 1.45, 0]}>
-        <sphereGeometry args={[0.32, 12, 12]} />
-        <primitive object={coronaMaterial} attach="material" />
-      </mesh>
-
-      {/* 7. Rotating Top LIDAR Sensor Head */}
-      <group ref={radarHeadRef} position={[0, 1.75, 0]}>
-        <mesh>
-          <cylinderGeometry args={[0.06, 0.06, 0.08, 10]} />
-          <meshStandardMaterial color="#2E2E2E" metalness={0.9} />
-        </mesh>
-        <mesh position={[0.08, 0, 0]}>
-          <boxGeometry args={[0.06, 0.03, 0.03]} />
-          <meshStandardMaterial
-            color="#00C758"
-            emissive="#00C758"
-            emissiveIntensity={3}
-          />
-        </mesh>
-      </group>
-
-      {/* Danger notice. Live-line towers carry a permanent hazard plate with the
-          circuit voltage so ground crews and the public can identify the asset. */}
-      <group position={[0, -0.62, 0.42]}>
-        <mesh>
-          <boxGeometry args={[0.26, 0.18, 0.012]} />
-          <meshStandardMaterial color="#E8E8E8" roughness={0.6} />
-        </mesh>
-        {/* Hazard triangle, drawn as a filled chevron */}
-        <mesh position={[0, 0.035, 0.008]}>
-          <circleGeometry args={[0.032, 3]} />
-          <meshBasicMaterial color="#1A1A1A" />
-        </mesh>
-        {/* Voltage band across the plate */}
-        <mesh position={[0, -0.045, 0.008]}>
-          <boxGeometry args={[0.2, 0.022, 0.004]} />
-          <meshBasicMaterial color="#1A1A1A" />
-        </mesh>
-      </group>
-
-      {/* Span dimension: the horizontal distance to the adjacent structure, marked
-          the way a line survey drawing dimensions the corridor. */}
-      <group position={[0, -0.95, 0]}>
-        <lineSegments>
-          <bufferGeometry>
-            <bufferAttribute
-              attach="attributes-position"
-              args={[SPAN_MARKER, 3]}
-            />
-          </bufferGeometry>
-          <lineBasicMaterial color="#FFB74D" transparent opacity={0.5} />
-        </lineSegments>
-      </group>
-
-      {/* Earth / shield wires on the peak, sagging continuously across the run */}
-      {SHIELD_WIRES.map((w, i) => (
-        <mesh key={`shield-${i}`} geometry={w.geometry}>
-          <meshBasicMaterial
-            color="#B8B8B8"
-            transparent
-            opacity={0.5}
-          />
-        </mesh>
-      ))}
-
-      {/* Structure identification plate. Every tower on a transmission line
-          carries its number so field crews can report faults by location. */}
-      <group position={[0, -0.05, 0.46]}>
-        <mesh>
-          <boxGeometry args={[0.3, 0.16, 0.012]} />
-          <meshStandardMaterial
-            color="#D8D8D8"
-            metalness={0.6}
-            roughness={0.5}
-          />
-        </mesh>
-        {/* Number bands, painted on the plate */}
-        {[0, 1, 2].map((i) => (
-          <mesh key={`id-${i}`} position={[-0.09 + i * 0.09, 0, 0.008]}>
-            <boxGeometry args={[0.055, 0.1, 0.004]} />
-            <meshBasicMaterial color="#1A1A1A" />
-          </mesh>
-        ))}
-      </group>
-
-      {/* Bird diverters: the striped markers hung on shield wires to make the
-          line visible to low-flying aircraft. */}
-      {SHIELD_WIRES.map((_, wi) =>
-        [0.85, 1.7, 2.55].map((t, i) => {
-          const z = -t;
-          return (
-            <mesh key={`div-${wi}-${i}`} position={[wi === 0 ? -0.22 : 0.22, 1.1, z]}>
-              <boxGeometry args={[0.05, 0.05, 0.008]} />
-              <meshBasicMaterial color="#E8B33A" />
-            </mesh>
-          );
-        })
-      )}
-
-      {/* Tower crown: three angled peak arms with chrome tips and an arrestor rod */}
-      <group position={[0, 1.95, 0]}>
-        {[0, 2.09, 4.19].map((a, i) => (
-          <group key={i} rotation={[0, a, 0]}>
-            <mesh position={[0.16, 0.1, 0]} rotation={[0, 0, -0.6]}>
-              <cylinderGeometry args={[0.006, 0.006, 0.3, 5]} />
-              <meshStandardMaterial color="#FE6E00" metalness={0.8} roughness={0.3} />
-            </mesh>
-            <mesh position={[0.28, 0.24, 0]}>
-              <sphereGeometry args={[0.014, 8, 8]} />
+        {/* 4 Concrete Tower Leg Pedestals & Anchor Plates */}
+        {towerData.footingCorners.map(([fx, fz], i) => (
+          <group key={`footing-${i}`} position={[fx, 0.07, fz]}>
+            <mesh>
+              <boxGeometry args={[0.18, 0.1, 0.18]} />
               <meshStandardMaterial
-                color="#D6D6D6"
-                metalness={0.95}
-                roughness={0.15}
+                color="#2A3444"
+                metalness={0.5}
+                roughness={0.5}
+              />
+            </mesh>
+            <mesh position={[0, 0.055, 0]}>
+              <boxGeometry args={[0.12, 0.02, 0.12]} />
+              <meshStandardMaterial
+                color="#FE6E00"
+                emissive="#FE6E00"
+                emissiveIntensity={0.8}
               />
             </mesh>
           </group>
         ))}
-        {/* Lightning arrestor */}
-        <mesh position={[0, 0.28, 0]}>
-          <cylinderGeometry args={[0.004, 0.004, 0.5, 5]} />
-          <meshStandardMaterial color="#C9A227" metalness={0.95} roughness={0.2} />
+
+        {/* 4 Corner Yard Telemetry Bollards */}
+        {[
+          [-1.2, -1.0],
+          [1.2, -1.0],
+          [-1.2, 1.0],
+          [1.2, 1.0],
+        ].map(([bx, bz], i) => (
+          <group key={`bollard-${i}`} position={[bx, 0.08, bz]}>
+            <mesh>
+              <cylinderGeometry args={[0.018, 0.022, 0.12, 8]} />
+              <meshStandardMaterial color="#334155" metalness={0.8} roughness={0.3} />
+            </mesh>
+            <mesh position={[0, 0.07, 0]}>
+              <sphereGeometry args={[0.02, 8, 8]} />
+              <meshBasicMaterial color={i % 2 === 0 ? "#FE6E00" : "#38BDF8"} />
+            </mesh>
+          </group>
+        ))}
+
+        {/* Outer Substation Survey Azimuth Halo Ring */}
+        <group ref={yardRingRef} position={[0, -0.04, 0]} rotation={[Math.PI / 2, 0, 0]}>
+          <mesh>
+            <torusGeometry args={[1.92, 0.005, 6, 64]} />
+            <meshBasicMaterial color="#FE6E00" transparent opacity={0.35} />
+          </mesh>
+          <mesh>
+            <torusGeometry args={[2.02, 0.003, 6, 64]} />
+            <meshBasicMaterial color="#38BDF8" transparent opacity={0.22} />
+          </mesh>
+        </group>
+      </group>
+
+      {/* =====================================================================
+          2. LEFT BAY: 220/33kV STEP-DOWN POWER TRANSFORMER UNIT
+      ===================================================================== */}
+      <group position={[-0.82, -1.02, 0.42]}>
+        <mesh position={[0, -0.24, 0]}>
+          <boxGeometry args={[0.66, 0.06, 0.52]} />
+          <meshStandardMaterial color="#252F3F" metalness={0.6} roughness={0.4} />
         </mesh>
-        <mesh position={[0, 0.54, 0]}>
-          <sphereGeometry args={[0.018, 8, 8]} />
+
+        <mesh position={[0, 0, 0]}>
+          <boxGeometry args={[0.48, 0.42, 0.34]} />
           <meshStandardMaterial
-            color="#FE6E00"
-            emissive="#FE6E00"
-            emissiveIntensity={5}
+            color="#2B3648"
+            metalness={0.78}
+            roughness={0.28}
           />
+        </mesh>
+
+        {[-0.18, -0.11, -0.04, 0.04, 0.11, 0.18].map((fx, fi) => (
+          <mesh key={`fin-${fi}`} position={[fx, 0, 0.19]}>
+            <boxGeometry args={[0.022, 0.34, 0.06]} />
+            <meshStandardMaterial
+              color="#3B4960"
+              metalness={0.85}
+              roughness={0.25}
+            />
+          </mesh>
+        ))}
+
+        <mesh position={[-0.08, 0.3, -0.06]} rotation={[0, 0, Math.PI / 2]}>
+          <cylinderGeometry args={[0.055, 0.055, 0.32, 14]} />
+          <meshStandardMaterial
+            color="#475569"
+            metalness={0.85}
+            roughness={0.22}
+          />
+        </mesh>
+        <mesh position={[0.085, 0.3, -0.06]} rotation={[0, 0, Math.PI / 2]}>
+          <cylinderGeometry args={[0.057, 0.057, 0.015, 14]} />
+          <meshBasicMaterial color="#FE6E00" />
+        </mesh>
+
+        {[
+          { x: -0.14, color: "#38BDF8" },
+          { x: 0, color: "#FFB74D" },
+          { x: 0.14, color: "#FE6E00" },
+        ].map((bush, bi) => (
+          <group key={`bush-${bi}`} position={[bush.x, 0.22, 0.04]}>
+            {[0, 1, 2, 3, 4].map((d) => (
+              <mesh key={d} position={[0, 0.04 + d * 0.042, 0]}>
+                <cylinderGeometry args={[0.032, 0.024, 0.022, 10]} />
+                <meshStandardMaterial
+                  color="#E2E8F0"
+                  metalness={0.4}
+                  roughness={0.3}
+                />
+              </mesh>
+            ))}
+            <mesh position={[0, 0.28, 0]}>
+              <sphereGeometry args={[0.024, 10, 10]} />
+              <meshBasicMaterial color={bush.color} />
+            </mesh>
+          </group>
+        ))}
+
+        <mesh position={[0.245, 0.04, 0]}>
+          <boxGeometry args={[0.015, 0.16, 0.18]} />
+          <meshBasicMaterial color="#10B981" />
         </mesh>
       </group>
 
-      {/* 8. Apex Aviation Warning Strobe (emissive flash replaces the point light) */}
-      <mesh ref={beaconRef} position={[0, 2.0, 0]}>
-        <sphereGeometry args={[0.035, 8, 8]} />
-        <meshStandardMaterial
-          color="#FFFFFF"
-          emissive="#FE6E00"
-          emissiveIntensity={3.0}
-        />
-      </mesh>
+      {/* =====================================================================
+          2B. ELEVATED 3-PHASE TUBULAR BUSBAR BRIDGE & ISOLATOR SWITCHBAY
+      ===================================================================== */}
+      <group position={[0, -0.88, 0.68]}>
+        {/* Center Isolator Support Portal Post */}
+        <mesh position={[0, -0.22, 0]}>
+          <boxGeometry args={[0.14, 0.36, 0.14]} />
+          <meshStandardMaterial color="#252F3F" metalness={0.7} roughness={0.35} />
+        </mesh>
+        {/* 3 Post Insulators & Tubular Busbars linking Transformer to SCADA Kiosk */}
+        {[
+          { zOff: -0.05, yOff: 0.04, color: "#FE6E00" },
+          { zOff: 0, yOff: 0.0, color: "#FFB74D" },
+          { zOff: 0.05, yOff: -0.04, color: "#38BDF8" },
+        ].map((bus, bi) => (
+          <group key={`busbar-${bi}`} position={[0, bus.yOff, bus.zOff]}>
+            <mesh rotation={[0, 0, Math.PI / 2]}>
+              <cylinderGeometry args={[0.0055, 0.0055, 1.15, 8]} />
+              <meshBasicMaterial color={bus.color} />
+            </mesh>
+            <mesh position={[0, -0.04, 0]}>
+              <cylinderGeometry args={[0.014, 0.014, 0.08, 8]} />
+              <meshStandardMaterial color="#E2E8F0" metalness={0.4} roughness={0.3} />
+            </mesh>
+          </group>
+        ))}
+      </group>
+
+      {/* =====================================================================
+          2C. REAR BAY: 3-POLE SF6 CIRCUIT BREAKER & CAPACITOR BANK
+      ===================================================================== */}
+      <group position={[-0.84, -1.1, -0.52]}>
+        <mesh position={[0, -0.14, 0]}>
+          <boxGeometry args={[0.52, 0.06, 0.38]} />
+          <meshStandardMaterial color="#252F3F" metalness={0.6} roughness={0.4} />
+        </mesh>
+        <mesh position={[0, 0, 0]}>
+          <boxGeometry args={[0.42, 0.22, 0.24]} />
+          <meshStandardMaterial color="#2B3648" metalness={0.75} roughness={0.3} />
+        </mesh>
+        {[-0.12, 0, 0.12].map((px, pi) => (
+          <group key={`sf6-${pi}`} position={[px, 0.22, 0]}>
+            <mesh>
+              <cylinderGeometry args={[0.026, 0.026, 0.22, 10]} />
+              <meshStandardMaterial color="#CBD5E1" metalness={0.5} roughness={0.3} />
+            </mesh>
+            <mesh position={[0, 0.13, 0]}>
+              <sphereGeometry args={[0.018, 8, 8]} />
+              <meshBasicMaterial
+                color={pi === 0 ? "#FE6E00" : pi === 1 ? "#FFB74D" : "#38BDF8"}
+              />
+            </mesh>
+          </group>
+        ))}
+      </group>
+
+      {/* =====================================================================
+          3. RIGHT BAY: SCADA TELEMETRY & GIS CONTROL KIOSK
+      ===================================================================== */}
+      <group position={[0.82, -1.06, 0.44]}>
+        <mesh position={[0, 0, 0]}>
+          <boxGeometry args={[0.54, 0.36, 0.38]} />
+          <meshStandardMaterial
+            color="#222B3A"
+            metalness={0.72}
+            roughness={0.32}
+          />
+        </mesh>
+
+        <mesh position={[0, 0.195, 0.02]}>
+          <boxGeometry args={[0.6, 0.03, 0.44]} />
+          <meshStandardMaterial
+            color="#334155"
+            metalness={0.85}
+            roughness={0.24}
+          />
+        </mesh>
+        <mesh position={[0, 0.195, 0.242]}>
+          <boxGeometry args={[0.6, 0.022, 0.01]} />
+          <meshBasicMaterial color="#FE6E00" />
+        </mesh>
+
+        {/* Illuminated SCADA Mimic Diagram Display Window */}
+        <mesh position={[-0.06, 0.02, 0.192]}>
+          <boxGeometry args={[0.3, 0.16, 0.01]} />
+          <meshStandardMaterial
+            color="#0B1528"
+            emissive="#0284C7"
+            emissiveIntensity={1.2}
+          />
+        </mesh>
+        <mesh position={[-0.06, 0.04, 0.198]}>
+          <boxGeometry args={[0.24, 0.018, 0.006]} />
+          <meshBasicMaterial color="#38BDF8" />
+        </mesh>
+        <mesh position={[-0.06, -0.01, 0.198]}>
+          <boxGeometry args={[0.2, 0.018, 0.006]} />
+          <meshBasicMaterial color="#FE6E00" />
+        </mesh>
+
+        <mesh position={[0.17, -0.02, 0.192]}>
+          <boxGeometry args={[0.1, 0.26, 0.01]} />
+          <meshStandardMaterial color="#334155" metalness={0.8} roughness={0.3} />
+        </mesh>
+        <mesh position={[0.17, 0.14, 0.196]}>
+          <boxGeometry args={[0.04, 0.02, 0.01]} />
+          <meshBasicMaterial color="#10B981" />
+        </mesh>
+
+        {/* Roof-Mounted Rotating SCADA Telemetry Dish & Halo */}
+        <group ref={radarDishRef} position={[0, 0.28, 0]}>
+          <mesh position={[0, -0.04, 0]}>
+            <cylinderGeometry args={[0.02, 0.025, 0.08, 8]} />
+            <meshStandardMaterial color="#94A3B8" metalness={0.9} roughness={0.2} />
+          </mesh>
+          <mesh rotation={[0.35, 0, 0]}>
+            <coneGeometry args={[0.08, 0.05, 14, 1, true]} />
+            <meshStandardMaterial
+              color="#E2E8F0"
+              metalness={0.88}
+              roughness={0.2}
+              side={THREE.DoubleSide}
+            />
+          </mesh>
+          <mesh position={[0, 0.02, 0.03]}>
+            <sphereGeometry args={[0.014, 8, 8]} />
+            <meshBasicMaterial color="#38BDF8" />
+          </mesh>
+          <mesh position={[0, 0.03, 0]} rotation={[Math.PI / 2, 0, 0]}>
+            <ringGeometry args={[0.1, 0.115, 16]} />
+            <meshBasicMaterial
+              color="#38BDF8"
+              side={THREE.DoubleSide}
+              transparent
+              opacity={0.55}
+            />
+          </mesh>
+        </group>
+      </group>
+
+      {/* =====================================================================
+          4. 220kV DOUBLE-CIRCUIT STEEL LATTICE TRANSMISSION TOWER
+      ===================================================================== */}
+      {towerData.mainStruts.map((s, idx) => (
+        <mesh key={`strut-${idx}`} position={s.position} quaternion={s.quaternion}>
+          <cylinderGeometry args={[s.radius, s.radius, s.length, 6]} />
+          <meshStandardMaterial
+            color="#94A3B8"
+            metalness={0.82}
+            roughness={0.28}
+          />
+        </mesh>
+      ))}
+
+      <lineSegments>
+        <bufferGeometry>
+          <bufferAttribute
+            attach="attributes-position"
+            args={[towerData.bracePositions, 3]}
+          />
+        </bufferGeometry>
+        <lineBasicMaterial color="#FFB74D" transparent opacity={0.82} />
+      </lineSegments>
+
+      {/* =====================================================================
+          5. SIX SUSPENSION INSULATOR STRINGS, CORONA RINGS & ARCS
+      ===================================================================== */}
+      {insulatorClusters.map((ins, i) => (
+        <group key={`ins-${i}`} position={[ins.x, ins.y, 0]}>
+          <mesh position={[0, -0.1, 0]}>
+            <cylinderGeometry args={[0.006, 0.006, 0.22, 6]} />
+            <meshStandardMaterial color="#CBD5E1" metalness={0.9} roughness={0.2} />
+          </mesh>
+
+          {Array.from({ length: 7 }, (_, d) => (
+            <mesh key={d} position={[0, -0.02 - d * 0.028, 0]}>
+              <cylinderGeometry args={[0.038, 0.028, 0.012, 12]} />
+              <meshStandardMaterial
+                color="#E0F2FE"
+                emissive={ins.color}
+                emissiveIntensity={0.45}
+                metalness={0.35}
+                roughness={0.25}
+              />
+            </mesh>
+          ))}
+
+          {/* Corona Field-Grading Ring & Conductor Clamp */}
+          <mesh position={[0, -0.22, 0]} rotation={[Math.PI / 2, 0, 0]}>
+            <torusGeometry args={[0.048, 0.006, 6, 16]} />
+            <meshStandardMaterial color="#E2E8F0" metalness={0.9} roughness={0.2} />
+          </mesh>
+          <mesh position={[0, -0.22, 0]}>
+            <sphereGeometry args={[0.02, 8, 8]} />
+            <meshBasicMaterial color={ins.color} />
+          </mesh>
+
+          {/* Animated High-Voltage Corona Discharge Filament */}
+          <mesh
+            ref={(el) => {
+              coronaArcRefs.current[i] = el as THREE.Mesh;
+            }}
+            position={[0.02, -0.11, 0]}
+            rotation={[0, 0, 0.18]}
+          >
+            <cylinderGeometry args={[0.003, 0.003, 0.2, 4]} />
+            <meshBasicMaterial
+              color="#FFFFFF"
+              transparent
+              opacity={0.7}
+              blending={THREE.AdditiveBlending}
+              depthWrite={false}
+            />
+          </mesh>
+        </group>
+      ))}
+
+      {/* =====================================================================
+          6. THREE-PHASE CATENARY CONDUCTORS, DROP-LEADS & ENERGY PACKETS
+      ===================================================================== */}
+      {conductorLines.map((line, li) => (
+        <React.Fragment key={line.id}>
+          <mesh geometry={line.geometry}>
+            <meshBasicMaterial
+              color={line.color}
+              transparent
+              opacity={0.78}
+              blending={THREE.AdditiveBlending}
+              depthWrite={false}
+            />
+          </mesh>
+          <mesh
+            ref={(el) => {
+              pulseTrailRefs.current[li] = el as THREE.Mesh;
+            }}
+          >
+            <sphereGeometry args={[0.014, 8, 8]} />
+            <meshBasicMaterial
+              color={line.color}
+              transparent
+              opacity={0.48}
+              blending={THREE.AdditiveBlending}
+              depthWrite={false}
+            />
+          </mesh>
+          <mesh
+            ref={(el) => {
+              pulseRefs.current[li] = el as THREE.Mesh;
+            }}
+          >
+            <sphereGeometry args={[0.022, 10, 10]} />
+            <meshBasicMaterial color="#FFFFFF" />
+          </mesh>
+        </React.Fragment>
+      ))}
+
+      {/* =====================================================================
+          7. TOWER PEAK ARRESTOR SPIRE, AVIATION MARKERS & FAA STROBE
+      ===================================================================== */}
+      {[0.45, 0.95, 1.45].map((zDist, idx) => (
+        <mesh
+          key={`av-ball-${idx}`}
+          position={[0, 1.77 - idx * 0.04, -zDist]}
+        >
+          <sphereGeometry args={[0.036, 12, 12]} />
+          <meshStandardMaterial
+            color={idx % 2 === 0 ? "#FE6E00" : "#F8FAFC"}
+            emissive={idx % 2 === 0 ? "#FE6E00" : "#38BDF8"}
+            emissiveIntensity={0.45}
+            roughness={0.3}
+            metalness={0.3}
+          />
+        </mesh>
+      ))}
+
+      <group position={[0, 1.84, 0]}>
+        <mesh position={[0, 0.14, 0]}>
+          <cylinderGeometry args={[0.006, 0.012, 0.28, 8]} />
+          <meshStandardMaterial color="#E2E8F0" metalness={0.92} roughness={0.18} />
+        </mesh>
+        <mesh position={[0, 0.04, 0]} rotation={[Math.PI / 2, 0, 0]}>
+          <torusGeometry args={[0.09, 0.006, 6, 20]} />
+          <meshBasicMaterial color="#FE6E00" />
+        </mesh>
+        <mesh ref={beaconRef} position={[0, 0.3, 0]}>
+          <sphereGeometry args={[0.036, 12, 12]} />
+          <meshStandardMaterial
+            color="#FFFFFF"
+            emissive="#FE6E00"
+            emissiveIntensity={4.5}
+          />
+        </mesh>
+      </group>
     </group>
   );
 }
