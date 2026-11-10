@@ -18,9 +18,9 @@ interface ExperienceProps {
 }
 
 const FRAME_FOV = 45;
-// Outer radius of the globe assembly at scale 1: the satellite's orbit ring
-// plus its deployed solar array span, so the wings clear the frame edge too.
-const GLOBE_OUTER_RADIUS = 1.72;
+// Radius at scale 1 that must stay inside the frame: the outermost satellite
+// orbit. Only a passing satellite's solar wings may brush the edge.
+const GLOBE_OUTER_RADIUS = 1.52;
 
 // Half-extents of the camera frustum at the globe's staging depth, refreshed on
 // resize so framing is derived from the real viewport instead of magic numbers
@@ -213,7 +213,7 @@ export default function Experience({
         // scale are derived from the live frustum so the full assembly (satellite
         // ring included) stays inside the frame on ultrawide, 16:9 and 4:3 alike.
         const { halfW } = frameRef.current;
-        const heroGX = Math.min(1.25, halfW * 0.4);
+        const heroGX = Math.min(1.6, halfW * 0.46);
         // Widest scale whose outer ring still clears the right frame edge
         const heroScaleFit = (halfW * 0.985 - heroGX) / GLOBE_OUTER_RADIUS;
         const heroScale = THREE.MathUtils.clamp(heroScaleFit, 0.8, 1.65);
@@ -273,13 +273,13 @@ export default function Experience({
       const targetDroneY = isMobile
         ? THREE.MathUtils.lerp(2.5, 0.08, worksVis)
         : THREE.MathUtils.lerp(2.5, 0.02, worksVis);
-      const targetDroneX = isMobile ? 0 : 1.08;
+      const targetDroneX = isMobile ? 0 : 1.12;
       const targetDroneZ = isMobile
         ? THREE.MathUtils.lerp(-2.0, 0.45, worksVis)
         : THREE.MathUtils.lerp(-2.0, 0.18, worksVis);
       const targetDroneScale = isMobile
         ? THREE.MathUtils.lerp(0.2, 0.40, worksVis)
-        : THREE.MathUtils.lerp(0.2, 0.48, worksVis);
+        : THREE.MathUtils.lerp(0.2, 0.56, worksVis);
 
       droneGroupRef.current.position.y = THREE.MathUtils.damp(
         droneGroupRef.current.position.y,
@@ -314,7 +314,7 @@ export default function Experience({
       gridAssetRef.current.visible = contactVis > 0.04;
 
       const targetMastX = isMobile ? 0 : 1.32;
-      const targetMastY = THREE.MathUtils.lerp(-10.0, isMobile ? 0.70 : -0.42, contactVis);
+      const targetMastY = THREE.MathUtils.lerp(-10.0, isMobile ? 0.70 : 0.05, contactVis);
       const targetMastZ = THREE.MathUtils.lerp(-4.0, isMobile ? -0.75 : 0.2, contactVis);
 
       gridAssetRef.current.position.x = THREE.MathUtils.damp(
@@ -370,7 +370,7 @@ export default function Experience({
 
       {/* 3D ELECTRICAL GRID MAST */}
       <group ref={gridAssetRef} position={[2.2, -12, -4]} visible={false}>
-        <GridNetworkAsset scale={isMobile ? 0.72 : 0.84} />
+        <GridNetworkAsset scale={0.72} />
       </group>
 
       {/* 3D AUTONOMOUS DRONE (MISSION CONTROL SECTION 03) */}

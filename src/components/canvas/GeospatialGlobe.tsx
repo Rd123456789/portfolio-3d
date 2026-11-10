@@ -14,18 +14,28 @@ import {
   sceneSunVector,
 } from "@/lib/geo";
 import {
+  advanceClock,
   createAtmosphereMaterial,
+  createFlowLineMaterial,
   createGlobeCoreMaterial,
   createGlobeGridLineMaterial,
+  createLandMaskTexture,
   createTerrainDotMatrixMaterial,
   createLandmarkMaterial,
+  setUniform,
   syncDotMatrixScale,
+  type TimeUniform,
 } from "@/lib/shaders";
 
 interface GeospatialGlobeProps {
   position?: [number, number, number];
   scale?: number;
+  /** Lighter build for phones: coarser dot matrix, two satellites, fewer segments. */
+  lite?: boolean;
 }
+
+const CORE_RADIUS = 0.988;
+const ATMOSPHERE_RADIUS = 1.12;
 
 interface GisHubConfig {
   id: string;
@@ -107,6 +117,7 @@ function GisSurfaceHub({
 }) {
   const waveRingRef = useRef<THREE.Mesh>(null!);
   const outerWaveRef = useRef<THREE.Mesh>(null!);
+  const beaconRef = useRef<THREE.Mesh>(null!);
 
   const { position, quaternion } = useMemo(() => {
     const pos = latLonToVector3(hub.lat, hub.lon, globeRadius);
@@ -118,41 +129,41 @@ function GisSurfaceHub({
     return { position: pos, quaternion: quat };
   }, [hub.lat, hub.lon, globeRadius]);
 
+  const reach = hub.isPrimary ? 3.6 : 2.6;
+
   useFrame((state) => {
     const t = state.clock.getElapsedTime();
-    if (waveRingRef.current) {
-      const p = (t * hub.pulseSpeed) % 1;
-      const s = 1 + p * (hub.isPrimary ? 3.2 : 2.4);
-      waveRingRef.current.scale.set(s, s, s);
-      const mat = waveRingRef.current.material as THREE.MeshBasicMaterial;
-      mat.opacity = Math.max(0, 0.85 * (1 - p));
-    }
-    if (outerWaveRef.current) {
-      const p2 = (t * hub.pulseSpeed + 0.5) % 1;
-      const s2 = 1 + p2 * (hub.isPrimary ? 3.2 : 2.4);
-      outerWaveRef.current.scale.set(s2, s2, s2);
-      const mat = outerWaveRef.current.material as THREE.MeshBasicMaterial;
-      mat.opacity = Math.max(0, 0.65 * (1 - p2));
-    }
+    const pulse = (ring: THREE.Mesh | null, phase: number, peak: number) => {
+      if (!ring) return;
+      const p = (t * hub.pulseSpeed * 0.5 + phase) % 1;
+      const eased = 1 - (1 - p) * (1 - p);
+      ring.scale.setScalar(1 + eased * reach);
+      (ring.material as THREE.MeshBasicMaterial).opacity =
+        peak * (1 - p) * (1 - p);
+    };
+    pulse(waveRingRef.current, 0, 0.9);
+    pulse(outerWaveRef.current, 0.5, 0.7);
+    if (beaconRef.current) beaconRef.current.rotation.y = t * 1.4;
   });
 
-  const baseRadius = hub.isPrimary ? 0.028 : 0.02;
-  const pillarHeight = hub.isPrimary ? 0.11 : 0.075;
+  const baseRadius = hub.isPrimary ? 0.028 : 0.019;
+  const mastHeight = hub.isPrimary ? 0.13 : 0.08;
 
   return (
     <group position={position} quaternion={quaternion}>
+      {/* Survey marker: crisp locator ring with a solid datum point */}
       <mesh rotation={[-Math.PI / 2, 0, 0]}>
-        <ringGeometry args={[baseRadius * 0.55, baseRadius, 6]} />
-        <meshBasicMaterial
-          color={hub.color}
-          side={THREE.DoubleSide}
-          transparent
-          opacity={0.95}
-        />
+        <ringGeometry args={[baseRadius * 0.78, baseRadius, 28]} />
+        <meshBasicMaterial color={hub.color} side={THREE.DoubleSide} />
+      </mesh>
+      <mesh rotation={[-Math.PI / 2, 0, 0]}>
+        <circleGeometry args={[baseRadius * 0.34, 16]} />
+        <meshBasicMaterial color={hub.coreColor} side={THREE.DoubleSide} />
       </mesh>
 
+      {/* Two staggered sonar pings easing out across the surface */}
       <mesh ref={waveRingRef} rotation={[-Math.PI / 2, 0, 0]}>
-        <ringGeometry args={[baseRadius * 0.8, baseRadius * 1.15, 6]} />
+        <ringGeometry args={[baseRadius * 0.9, baseRadius, 28]} />
         <meshBasicMaterial
           color={hub.color}
           side={THREE.DoubleSide}
@@ -163,9 +174,9 @@ function GisSurfaceHub({
         />
       </mesh>
       <mesh ref={outerWaveRef} rotation={[-Math.PI / 2, 0, 0]}>
-        <ringGeometry args={[baseRadius * 0.8, baseRadius * 1.15, 6]} />
+        <ringGeometry args={[baseRadius * 0.9, baseRadius, 28]} />
         <meshBasicMaterial
-          color={hub.coreColor}
+          color={hub.color}
           side={THREE.DoubleSide}
           transparent
           opacity={0.6}
@@ -174,27 +185,14 @@ function GisSurfaceHub({
         />
       </mesh>
 
-      <mesh position={[0, pillarHeight * 0.5, 0]}>
-        <cylinderGeometry
-          args={[baseRadius * 0.18, baseRadius * 0.38, pillarHeight, 6]}
-        />
-        <meshBasicMaterial
-          color={hub.color}
-          transparent
-          opacity={0.45}
-          blending={THREE.AdditiveBlending}
-          depthWrite={false}
-        />
+      {/* Hairline telemetry mast and its beacon */}
+      <mesh position={[0, mastHeight * 0.5, 0]}>
+        <cylinderGeometry args={[0.0016, 0.0016, mastHeight, 5]} />
+        <meshBasicMaterial color={hub.coreColor} transparent opacity={0.85} />
       </mesh>
-
-      <mesh position={[0, pillarHeight * 0.55, 0]}>
-        <cylinderGeometry args={[0.0022, 0.0022, pillarHeight * 1.1, 6]} />
-        <meshBasicMaterial color={hub.coreColor} />
-      </mesh>
-
-      <mesh position={[0, pillarHeight * 1.12, 0]}>
-        <octahedronGeometry args={[hub.isPrimary ? 0.014 : 0.01, 0]} />
-        <meshBasicMaterial color="#FFFFFF" />
+      <mesh ref={beaconRef} position={[0, mastHeight + 0.012, 0]}>
+        <octahedronGeometry args={[hub.isPrimary ? 0.013 : 0.009, 0]} />
+        <meshBasicMaterial color={hub.isPrimary ? "#FFFFFF" : hub.color} />
       </mesh>
     </group>
   );
@@ -328,11 +326,121 @@ function OrbitalSatelliteUnit({
   );
 }
 
-const PACKET_POS = new THREE.Vector3();
+const HUBS: GisHubConfig[] = [
+  {
+    id: "ahmedabad-hq",
+    lat: 23.02,
+    lon: 72.57,
+    color: "#FE6E00",
+    coreColor: "#FFFFFF",
+    pulseSpeed: 1.35,
+    isPrimary: true,
+  },
+  {
+    id: "raipur-cspdcl",
+    lat: 21.25,
+    lon: 81.62,
+    color: "#38BDF8",
+    coreColor: "#E0F2FE",
+    pulseSpeed: 1.55,
+  },
+  {
+    id: "paris-solar",
+    lat: 48.85,
+    lon: 2.35,
+    color: "#FFB74D",
+    coreColor: "#FFF3E0",
+    pulseSpeed: 1.15,
+  },
+  {
+    id: "singapore-cloud",
+    lat: 1.35,
+    lon: 103.82,
+    color: "#10B981",
+    coreColor: "#D1FAE5",
+    pulseSpeed: 1.25,
+  },
+  {
+    id: "dubai-mena",
+    lat: 25.2,
+    lon: 55.27,
+    color: "#FFB74D",
+    coreColor: "#FFFFFF",
+    pulseSpeed: 1.4,
+  },
+  {
+    id: "bengaluru-tech",
+    lat: 12.97,
+    lon: 77.59,
+    color: "#38BDF8",
+    coreColor: "#FFFFFF",
+    pulseSpeed: 1.5,
+  },
+];
+
+// Telemetry links fanning out of the Ahmedabad HQ: [lat, lon, lift, colour, speed]
+const ARC_ROUTES: [number, number, number, string, number][] = [
+  [21.25, 81.62, 0.1, "#FE6E00", 0.62], // Raipur
+  [48.85, 2.35, 0.22, "#FFB74D", 0.3], // Paris
+  [1.35, 103.82, 0.22, "#10B981", 0.4], // Singapore
+  [25.2, 55.27, 0.14, "#FFB74D", 0.5], // Dubai
+  [12.97, 77.59, 0.09, "#38BDF8", 0.66], // Bengaluru
+  [28.61, 77.2, 0.08, "#FE6E00", 0.7], // Delhi
+];
+
+// Secondary cities shown as gazetteer pins (primary ones carry a full hub)
+const CITY_PINS = [
+  { lat: 19.07, lon: 72.87, color: "#FFFFFF" }, // Mumbai
+  { lat: 28.61, lon: 77.2, color: "#FFFFFF" }, // New Delhi
+  { lat: 22.57, lon: 88.36, color: "#FFFFFF" }, // Kolkata
+  { lat: 13.08, lon: 80.27, color: "#FFFFFF" }, // Chennai
+  { lat: 17.38, lon: 78.48, color: "#FFFFFF" }, // Hyderabad
+  { lat: 26.9, lon: 75.8, color: "#FFB74D" }, // Jaipur
+  { lat: 22.3, lon: 73.18, color: "#FE6E00" }, // Vadodara
+  { lat: 50.11, lon: 8.68, color: "#38BDF8" }, // Frankfurt
+  { lat: 51.5, lon: -0.12, color: "#FFFFFF" }, // London
+  { lat: 35.68, lon: 139.69, color: "#38BDF8" }, // Tokyo
+];
+
+/** Azimuth scale for the bezel: 72 graduations as one line-segment batch. */
+function buildBezelTicks(radius: number): {
+  positions: Float32Array;
+  colors: Float32Array;
+} {
+  const positions: number[] = [];
+  const colors: number[] = [];
+  const cardinal = new THREE.Color("#FE6E00");
+  const major = new THREE.Color("#FFB74D");
+  const minor = new THREE.Color("#5B6B80");
+
+  for (let i = 0; i < 72; i++) {
+    const angle = (i / 72) * Math.PI * 2;
+    const isCardinal = i % 18 === 0;
+    const isMajor = i % 6 === 0;
+    const length = isCardinal ? 0.07 : isMajor ? 0.042 : 0.02;
+    const c = isCardinal ? cardinal : isMajor ? major : minor;
+    const cos = Math.cos(angle);
+    const sin = Math.sin(angle);
+    positions.push(
+      cos * radius,
+      0,
+      sin * radius,
+      cos * (radius + length),
+      0,
+      sin * (radius + length)
+    );
+    colors.push(c.r, c.g, c.b, c.r, c.g, c.b);
+  }
+  return {
+    positions: new Float32Array(positions),
+    colors: new Float32Array(colors),
+  };
+}
 
 export default function GeospatialGlobe({
   position = [0, 0, 0],
   scale = 1,
+  lite = false,
 }: GeospatialGlobeProps) {
   const rootGroupRef = useRef<THREE.Group>(null!);
   const globeSpinRef = useRef<THREE.Group>(null!);
@@ -344,427 +452,183 @@ export default function GeospatialGlobe({
   const satOrbit3Ref = useRef<THREE.Group>(null!);
   const baseRingsRef = useRef<THREE.Group>(null!);
 
-  const arcPacketRefs = useRef<THREE.Mesh[]>([]);
-  const arcTrailRefs = useRef<THREE.Mesh[]>([]);
+  const sphereSegments = lite ? 48 : 72;
+  const ringSegments = lite ? 72 : 128;
 
-  const SUN_VECTOR = useMemo(() => sceneSunVector(), []);
+  const sun = useMemo(() => sceneSunVector(), []);
+  const clock = useMemo<TimeUniform>(() => ({ value: 0 }), []);
 
   const terrainMatrix = useMemo(
-    () => buildTerrainDotMatrix(2.2, 0.25, 0.012, SUN_VECTOR),
-    [SUN_VECTOR]
+    () => buildTerrainDotMatrix(lite ? 1.9 : 1.45, 0.012),
+    [lite]
   );
-
   const indiaCoastSegments = useMemo(
     () => buildIndiaCoastlineSegments(1.018),
     []
   );
   const indiaElevatedSegments = useMemo(
-    () => buildIndiaCoastlineSegments(1.032),
+    () => buildIndiaCoastlineSegments(1.034),
     []
   );
   const indiaGisMeshSegments = useMemo(() => buildIndiaGisMesh(1.024), []);
   const worldCoastSegments = useMemo(
-    () => buildWorldCoastlineSegments(1.007),
+    () => buildWorldCoastlineSegments(1.005),
     []
   );
-
   const graticule = useMemo(() => buildGraticule(1.0), []);
+  const cityPins = useMemo(() => buildLandmarkMarkers(CITY_PINS), []);
+  const bezelTicks = useMemo(() => buildBezelTicks(1.19), []);
 
-  const tier1Cities = useMemo(
+  const arcs = useMemo(
     () =>
-      buildLandmarkMarkers([
-        { lat: 23.02, lon: 72.57, color: "#FE6E00" }, // Ahmedabad HQ
-        { lat: 21.25, lon: 81.62, color: "#38BDF8" }, // Raipur CSPDCL
-        { lat: 48.85, lon: 2.35, color: "#FFB74D" }, // Paris (French Solar CAD)
-        { lat: 1.35, lon: 103.82, color: "#10B981" }, // Singapore
-        { lat: 25.2, lon: 55.27, color: "#FFB74D" }, // Dubai
-      ]),
-    []
+      ARC_ROUTES.map(([lat, lon, lift, color, speed], i) => {
+        const curve = buildGreatCircleArc(23.02, 72.57, lat, lon, 1.02, lift);
+        return {
+          id: `arc-${i}`,
+          geometry: new THREE.TubeGeometry(curve, 48, 0.004, 6, false),
+          material: createFlowLineMaterial({
+            color,
+            time: clock,
+            speed,
+            pulses: 1,
+            offset: i * 0.37,
+            base: 0.72,
+            fadeStart: 0.03,
+            fadeEnd: 0.03,
+          }),
+        };
+      }),
+    [clock]
   );
 
-  const tier2Cities = useMemo(
-    () =>
-      buildLandmarkMarkers([
-        { lat: 19.07, lon: 72.87, color: "#FFFFFF" }, // Mumbai
-        { lat: 28.61, lon: 77.2, color: "#FFFFFF" }, // New Delhi
-        { lat: 12.97, lon: 77.59, color: "#38BDF8" }, // Bengaluru
-        { lat: 22.57, lon: 88.36, color: "#FFFFFF" }, // Kolkata
-        { lat: 13.08, lon: 80.27, color: "#FFFFFF" }, // Chennai
-        { lat: 17.38, lon: 78.48, color: "#FFFFFF" }, // Hyderabad
-        { lat: 26.9, lon: 75.8, color: "#FFB74D" }, // Jaipur
-        { lat: 22.3, lon: 73.18, color: "#FE6E00" }, // Vadodara
-        { lat: 50.11, lon: 8.68, color: "#38BDF8" }, // Frankfurt
-        { lat: 51.5, lon: -0.12, color: "#FFFFFF" }, // London
-        { lat: 35.68, lon: 139.69, color: "#38BDF8" }, // Tokyo
-      ]),
-    []
-  );
-
-  const hubs: GisHubConfig[] = useMemo(
-    () => [
-      {
-        id: "ahmedabad-hq",
-        lat: 23.02,
-        lon: 72.57,
-        color: "#FE6E00",
-        coreColor: "#FFFFFF",
-        pulseSpeed: 1.35,
-        isPrimary: true,
-      },
-      {
-        id: "raipur-cspdcl",
-        lat: 21.25,
-        lon: 81.62,
-        color: "#38BDF8",
-        coreColor: "#E0F2FE",
-        pulseSpeed: 1.55,
-      },
-      {
-        id: "paris-solar",
-        lat: 48.85,
-        lon: 2.35,
-        color: "#FFB74D",
-        coreColor: "#FFF3E0",
-        pulseSpeed: 1.15,
-      },
-      {
-        id: "singapore-cloud",
-        lat: 1.35,
-        lon: 103.82,
-        color: "#10B981",
-        coreColor: "#D1FAE5",
-        pulseSpeed: 1.25,
-      },
-      {
-        id: "dubai-mena",
-        lat: 25.2,
-        lon: 55.27,
-        color: "#FFB74D",
-        coreColor: "#FFFFFF",
-        pulseSpeed: 1.4,
-      },
-      {
-        id: "bengaluru-tech",
-        lat: 12.97,
-        lon: 77.59,
-        color: "#38BDF8",
-        coreColor: "#FFFFFF",
-        pulseSpeed: 1.5,
-      },
-    ],
-    []
-  );
-
-  const ARCS = useMemo(
-    () => [
-      {
-        id: "hq-raipur",
-        curve: buildGreatCircleArc(23.02, 72.57, 21.25, 81.62, 1.02, 0.14),
-        color: "#FE6E00",
-        packets: 2,
-        speed: 0.65,
-      },
-      {
-        id: "hq-paris",
-        curve: buildGreatCircleArc(23.02, 72.57, 48.85, 2.35, 1.02, 0.36),
-        color: "#FFB74D",
-        packets: 3,
-        speed: 0.38,
-      },
-      {
-        id: "hq-singapore",
-        curve: buildGreatCircleArc(23.02, 72.57, 1.35, 103.82, 1.02, 0.24),
-        color: "#10B981",
-        packets: 2,
-        speed: 0.48,
-      },
-      {
-        id: "hq-dubai",
-        curve: buildGreatCircleArc(23.02, 72.57, 25.2, 55.27, 1.02, 0.16),
-        color: "#FFB74D",
-        packets: 2,
-        speed: 0.58,
-      },
-      {
-        id: "hq-bengaluru",
-        curve: buildGreatCircleArc(23.02, 72.57, 12.97, 77.59, 1.02, 0.12),
-        color: "#38BDF8",
-        packets: 2,
-        speed: 0.72,
-      },
-      {
-        id: "hq-delhi",
-        curve: buildGreatCircleArc(23.02, 72.57, 28.61, 77.2, 1.02, 0.1),
-        color: "#FE6E00",
-        packets: 2,
-        speed: 0.78,
-      },
-    ],
-    []
-  );
-
-  const arcTubes = useMemo(
-    () =>
-      ARCS.map(
-        (a) => new THREE.TubeGeometry(a.curve, 32, 0.0042, 6, false)
-      ),
-    [ARCS]
-  );
-
+  const landMask = useMemo(() => createLandMaskTexture(), []);
   const coreMaterial = useMemo(
-    () => createGlobeCoreMaterial(SUN_VECTOR),
-    [SUN_VECTOR]
+    () => createGlobeCoreMaterial(sun, landMask),
+    [sun, landMask]
   );
   const atmosphereMaterial = useMemo(
-    () => createAtmosphereMaterial(SUN_VECTOR),
-    [SUN_VECTOR]
+    () => createAtmosphereMaterial(sun, CORE_RADIUS, ATMOSPHERE_RADIUS),
+    [sun]
   );
   const dotMaterial = useMemo(
-    () => createTerrainDotMatrixMaterial({ size: 0.036, opacity: 0.96 }),
-    []
+    () => createTerrainDotMatrixMaterial({ size: 0.028, opacity: 0.9, sun }),
+    [sun]
   );
-  const landmarkMaterial = useMemo(() => createLandmarkMaterial(0.115), []);
-  const landmarkSecondaryMaterial = useMemo(
-    () => createLandmarkMaterial(0.072),
-    []
-  );
+  const pinMaterial = useMemo(() => createLandmarkMaterial(0.07), []);
 
-  const graticuleMaterial = useMemo(
-    () => createGlobeGridLineMaterial({ color: "#334155", opacity: 0.36 }),
-    []
-  );
-  const equatorMaterial = useMemo(
-    () => createGlobeGridLineMaterial({ color: "#38BDF8", opacity: 0.52 }),
-    []
-  );
-  const tropicMaterial = useMemo(
-    () => createGlobeGridLineMaterial({ color: "#FE6E00", opacity: 0.62 }),
-    []
-  );
-  const worldCoastMaterial = useMemo(
-    () => createGlobeGridLineMaterial({ color: "#38BDF8", opacity: 0.58 }),
-    []
-  );
-  const indiaCoastMaterial = useMemo(
-    () => createGlobeGridLineMaterial({ color: "#FE6E00", opacity: 0.98 }),
-    []
-  );
-  const indiaElevatedMaterial = useMemo(
-    () => createGlobeGridLineMaterial({ color: "#FFB74D", opacity: 0.72 }),
-    []
-  );
-  const indiaMeshMaterial = useMemo(
-    () => createGlobeGridLineMaterial({ color: "#38BDF8", opacity: 0.68 }),
+  const lineMaterials = useMemo(
+    () => ({
+      graticule: createGlobeGridLineMaterial({ color: "#3B4A60", opacity: 0.3 }),
+      equator: createGlobeGridLineMaterial({ color: "#38BDF8", opacity: 0.42 }),
+      tropic: createGlobeGridLineMaterial({ color: "#FE6E00", opacity: 0.5 }),
+      worldCoast: createGlobeGridLineMaterial({ color: "#7CC4EE", opacity: 0.62 }),
+      indiaCoast: createGlobeGridLineMaterial({ color: "#FE6E00", opacity: 1 }),
+      indiaElevated: createGlobeGridLineMaterial({ color: "#FFB74D", opacity: 0.6 }),
+      indiaMesh: createGlobeGridLineMaterial({ color: "#38BDF8", opacity: 0.55 }),
+    }),
     []
   );
 
   useEffect(
     () => () => {
+      landMask.dispose();
       coreMaterial.dispose();
       atmosphereMaterial.dispose();
       dotMaterial.dispose();
-      landmarkMaterial.dispose();
-      landmarkSecondaryMaterial.dispose();
-      graticuleMaterial.dispose();
-      equatorMaterial.dispose();
-      tropicMaterial.dispose();
-      worldCoastMaterial.dispose();
-      indiaCoastMaterial.dispose();
-      indiaElevatedMaterial.dispose();
-      indiaMeshMaterial.dispose();
-      arcTubes.forEach((g) => g.dispose());
+      pinMaterial.dispose();
+      Object.values(lineMaterials).forEach((m) => m.dispose());
+      arcs.forEach((arc) => {
+        arc.geometry.dispose();
+        arc.material.dispose();
+      });
     },
     [
+      landMask,
       coreMaterial,
       atmosphereMaterial,
       dotMaterial,
-      landmarkMaterial,
-      landmarkSecondaryMaterial,
-      graticuleMaterial,
-      equatorMaterial,
-      tropicMaterial,
-      worldCoastMaterial,
-      indiaCoastMaterial,
-      indiaElevatedMaterial,
-      indiaMeshMaterial,
-      arcTubes,
+      pinMaterial,
+      lineMaterials,
+      arcs,
     ]
   );
 
   useFrame((state, delta) => {
     const t = state.clock.getElapsedTime();
+    advanceClock(clock, t);
 
+    // Slow survey drift that always keeps India on the facing hemisphere
     if (globeSpinRef.current) {
-      globeSpinRef.current.rotation.y = 3.02 + Math.sin(t * 0.26) * 0.18;
+      globeSpinRef.current.rotation.y = 3.16 + Math.sin(t * 0.26) * 0.18;
       globeSpinRef.current.rotation.x = 0.28 + Math.cos(t * 0.2) * 0.04;
     }
 
     syncDotMatrixScale(dotMaterial, state.size.height, state.viewport.dpr);
-    syncDotMatrixScale(landmarkMaterial, state.size.height, state.viewport.dpr);
-    syncDotMatrixScale(
-      landmarkSecondaryMaterial,
-      state.size.height,
-      state.viewport.dpr
-    );
+    syncDotMatrixScale(pinMaterial, state.size.height, state.viewport.dpr);
+    setUniform(coreMaterial, "uTime", t);
+    setUniform(pinMaterial, "uTime", t);
 
-    if (coreMaterial.uniforms?.uTime) {
-      coreMaterial.uniforms.uTime.value = t;
-    }
-    if (landmarkMaterial.uniforms?.uTime) {
-      landmarkMaterial.uniforms.uTime.value = t;
-    }
-    if (landmarkSecondaryMaterial.uniforms?.uTime) {
-      landmarkSecondaryMaterial.uniforms.uTime.value = t * 0.7 + 1.3;
-    }
+    if (bezelRingRef.current) bezelRingRef.current.rotation.y = t * 0.06;
+    if (caliperARef.current) caliperARef.current.rotation.z = t * 0.32;
+    if (caliperBRef.current) caliperBRef.current.rotation.z = -t * 0.24 + 1.2;
 
-    if (bezelRingRef.current) {
-      bezelRingRef.current.rotation.y = t * 0.06;
-    }
-    if (caliperARef.current) {
-      caliperARef.current.rotation.z = t * 0.32;
-    }
-    if (caliperBRef.current) {
-      caliperBRef.current.rotation.z = -t * 0.24 + 1.2;
-    }
+    if (satOrbit1Ref.current) satOrbit1Ref.current.rotation.z = t * 0.38 + 0.6;
+    if (satOrbit2Ref.current) satOrbit2Ref.current.rotation.z = -t * 0.29 + 2.4;
+    if (satOrbit3Ref.current) satOrbit3Ref.current.rotation.z = t * 0.22 + 4.1;
 
-    if (satOrbit1Ref.current) {
-      satOrbit1Ref.current.rotation.z = t * 0.38 + 0.6;
-    }
-    if (satOrbit2Ref.current) {
-      satOrbit2Ref.current.rotation.z = -t * 0.29 + 2.4;
-    }
-    if (satOrbit3Ref.current) {
-      satOrbit3Ref.current.rotation.z = t * 0.22 + 4.1;
-    }
-
-    if (baseRingsRef.current) {
-      baseRingsRef.current.rotation.z = -t * 0.15;
-    }
-
-    ARCS.forEach((arc, ai) => {
-      for (let i = 0; i < arc.packets; i++) {
-        const u = (t * arc.speed + ai * 0.21 + i / arc.packets) % 1;
-        const pkt = arcPacketRefs.current[ai * 4 + i];
-        if (pkt) {
-          arc.curve.getPoint(u, PACKET_POS);
-          pkt.position.copy(PACKET_POS);
-        }
-        const trail = arcTrailRefs.current[ai * 4 + i];
-        if (trail) {
-          arc.curve.getPoint((u - 0.045 + 1) % 1, PACKET_POS);
-          trail.position.copy(PACKET_POS);
-        }
-      }
-    });
+    if (baseRingsRef.current) baseRingsRef.current.rotation.z = -t * 0.15;
 
     if (rootGroupRef.current) {
-      const targetRotY = state.pointer.x * 0.24;
-      const targetRotX = -state.pointer.y * 0.16;
       rootGroupRef.current.rotation.y = THREE.MathUtils.damp(
         rootGroupRef.current.rotation.y,
-        targetRotY,
+        state.pointer.x * 0.24,
         4,
         delta
       );
       rootGroupRef.current.rotation.x = THREE.MathUtils.damp(
         rootGroupRef.current.rotation.x,
-        targetRotX,
+        -state.pointer.y * 0.16,
         4,
         delta
       );
     }
   });
 
+  const surfaceLines: [string, Float32Array, THREE.ShaderMaterial][] = [
+    ["graticule", graticule.standard, lineMaterials.graticule],
+    ["equator", graticule.equator, lineMaterials.equator],
+    ["prime-meridian", graticule.primeMeridian, lineMaterials.equator],
+    ["tropic", graticule.tropicOfCancer, lineMaterials.tropic],
+    ["world-coast", worldCoastSegments, lineMaterials.worldCoast],
+    ["india-coast", indiaCoastSegments, lineMaterials.indiaCoast],
+    ["india-elevated", indiaElevatedSegments, lineMaterials.indiaElevated],
+    ["india-mesh", indiaGisMeshSegments, lineMaterials.indiaMesh],
+  ];
+
   return (
     <group ref={rootGroupRef} position={position} scale={scale}>
       {/* =====================================================================
           1. PLANETARY GIS SPHERE (CONTINENTS, TOPOGRAPHY, HUBS & ARCS)
       ===================================================================== */}
-      <group ref={globeSpinRef} rotation={[0.28, 3.02, 0]}>
+      <group ref={globeSpinRef} rotation={[0.28, 3.16, 0]}>
         <mesh material={coreMaterial}>
-          <sphereGeometry args={[0.988, 48, 48]} />
+          <sphereGeometry args={[CORE_RADIUS, sphereSegments, sphereSegments]} />
         </mesh>
 
-        <mesh material={atmosphereMaterial}>
-          <sphereGeometry args={[1.055, 48, 48]} />
-        </mesh>
-
-        {/* 15-Degree Survey Graticule */}
-        <lineSegments material={graticuleMaterial}>
-          <bufferGeometry>
-            <bufferAttribute
-              attach="attributes-position"
-              args={[graticule.standard, 3]}
-            />
-          </bufferGeometry>
-        </lineSegments>
-
-        {/* Equator & Prime/75°E Meridian Reference Lines */}
-        <lineSegments material={equatorMaterial}>
-          <bufferGeometry>
-            <bufferAttribute
-              attach="attributes-position"
-              args={[graticule.equator, 3]}
-            />
-          </bufferGeometry>
-        </lineSegments>
-        <lineSegments material={equatorMaterial}>
-          <bufferGeometry>
-            <bufferAttribute
-              attach="attributes-position"
-              args={[graticule.primeMeridian, 3]}
-            />
-          </bufferGeometry>
-        </lineSegments>
-
-        {/* Tropic of Cancer */}
-        <lineSegments material={tropicMaterial}>
-          <bufferGeometry>
-            <bufferAttribute
-              attach="attributes-position"
-              args={[graticule.tropicOfCancer, 3]}
-            />
-          </bufferGeometry>
-        </lineSegments>
-
-        {/* Global Continental Vector Coastlines */}
-        <lineSegments material={worldCoastMaterial}>
-          <bufferGeometry>
-            <bufferAttribute
-              attach="attributes-position"
-              args={[worldCoastSegments, 3]}
-            />
-          </bufferGeometry>
-        </lineSegments>
-
-        {/* India Primary Vector Coastline, Elevated Hologram & Triangulated GIS Mesh */}
-        <lineSegments material={indiaCoastMaterial}>
-          <bufferGeometry>
-            <bufferAttribute
-              attach="attributes-position"
-              args={[indiaCoastSegments, 3]}
-            />
-          </bufferGeometry>
-        </lineSegments>
-        <lineSegments material={indiaElevatedMaterial}>
-          <bufferGeometry>
-            <bufferAttribute
-              attach="attributes-position"
-              args={[indiaElevatedSegments, 3]}
-            />
-          </bufferGeometry>
-        </lineSegments>
-        <lineSegments material={indiaMeshMaterial}>
-          <bufferGeometry>
-            <bufferAttribute
-              attach="attributes-position"
-              args={[indiaGisMeshSegments, 3]}
-            />
-          </bufferGeometry>
-        </lineSegments>
+        {/* Graticule, real-world coastlines, India outline + elevated hologram */}
+        {surfaceLines.map(([key, positions, material]) => (
+          <lineSegments key={key} material={material}>
+            <bufferGeometry>
+              <bufferAttribute
+                attach="attributes-position"
+                args={[positions, 3]}
+              />
+            </bufferGeometry>
+          </lineSegments>
+        ))}
 
         {/* Continental & India Topographic Dot Matrix */}
-        <points material={dotMaterial}>
+        <points key={`dots-${lite}`} material={dotMaterial}>
           <bufferGeometry>
             <bufferAttribute
               attach="attributes-position"
@@ -774,137 +638,78 @@ export default function GeospatialGlobe({
               attach="attributes-aColor"
               args={[terrainMatrix.colors, 3]}
             />
+            <bufferAttribute
+              attach="attributes-aSize"
+              args={[terrainMatrix.sizes, 1]}
+            />
           </bufferGeometry>
         </points>
 
-        {/* Tier-1 & Tier-2 City Gazetteer Pins */}
-        <points material={landmarkMaterial}>
+        {/* City Gazetteer Pins */}
+        <points material={pinMaterial}>
           <bufferGeometry>
             <bufferAttribute
               attach="attributes-position"
-              args={[tier1Cities.positions, 3]}
+              args={[cityPins.positions, 3]}
             />
             <bufferAttribute
               attach="attributes-aColor"
-              args={[tier1Cities.colors, 3]}
-            />
-          </bufferGeometry>
-        </points>
-        <points material={landmarkSecondaryMaterial}>
-          <bufferGeometry>
-            <bufferAttribute
-              attach="attributes-position"
-              args={[tier2Cities.positions, 3]}
-            />
-            <bufferAttribute
-              attach="attributes-aColor"
-              args={[tier2Cities.colors, 3]}
+              args={[cityPins.colors, 3]}
             />
           </bufferGeometry>
         </points>
 
         {/* Surface GIS Command Hubs */}
-        {hubs.map((hub) => (
+        {HUBS.map((hub) => (
           <GisSurfaceHub key={hub.id} hub={hub} globeRadius={1.018} />
         ))}
 
-        {/* Geodesic Telemetry Links & Photon Riders */}
-        {ARCS.map((arc, ai) => (
-          <React.Fragment key={arc.id}>
-            <mesh geometry={arcTubes[ai]}>
-              <meshBasicMaterial
-                color={arc.color}
-                transparent
-                opacity={0.72}
-                blending={THREE.AdditiveBlending}
-                depthWrite={false}
-              />
-            </mesh>
-            {Array.from({ length: arc.packets }, (_, i) => (
-              <React.Fragment key={`${arc.id}-pkt-${i}`}>
-                <mesh
-                  ref={(el) => {
-                    arcTrailRefs.current[ai * 4 + i] = el as THREE.Mesh;
-                  }}
-                >
-                  <sphereGeometry args={[0.009, 8, 8]} />
-                  <meshBasicMaterial
-                    color={arc.color}
-                    transparent
-                    opacity={0.45}
-                    blending={THREE.AdditiveBlending}
-                    depthWrite={false}
-                  />
-                </mesh>
-                <mesh
-                  ref={(el) => {
-                    arcPacketRefs.current[ai * 4 + i] = el as THREE.Mesh;
-                  }}
-                >
-                  <sphereGeometry args={[0.014, 10, 10]} />
-                  <meshBasicMaterial color="#FFFFFF" />
-                </mesh>
-              </React.Fragment>
-            ))}
-          </React.Fragment>
+        {/* Geodesic Telemetry Links carrying comet pulses out of the HQ */}
+        {arcs.map((arc) => (
+          <mesh key={arc.id} geometry={arc.geometry} material={arc.material} />
         ))}
       </group>
+
+      {/* Atmosphere halo stays fixed to the view so its lit side never spins */}
+      <mesh material={atmosphereMaterial}>
+        <sphereGeometry args={[ATMOSPHERE_RADIUS, sphereSegments, sphereSegments]} />
+      </mesh>
 
       {/* =====================================================================
           2. ARCHITECTURAL OBSERVATORY GIMBAL & EQUATORIAL ASTROLABE BEZEL
       ===================================================================== */}
-      <group rotation={[0.16, 0.12, -0.18]}>
+      <group rotation={[0.4, 0.12, -0.16]}>
         <group ref={bezelRingRef}>
           <mesh rotation={[Math.PI / 2, 0, 0]}>
-            <torusGeometry args={[1.19, 0.011, 8, 96]} />
+            <torusGeometry args={[1.19, 0.0095, 10, ringSegments]} />
             <meshStandardMaterial
-              color="#222936"
-              metalness={0.88}
-              roughness={0.26}
+              color="#8E9BAD"
+              metalness={1}
+              roughness={0.24}
             />
           </mesh>
 
           <mesh rotation={[Math.PI / 2, 0, 0]}>
-            <torusGeometry args={[1.16, 0.0035, 6, 96]} />
-            <meshBasicMaterial color="#FE6E00" transparent opacity={0.65} />
+            <torusGeometry args={[1.168, 0.003, 6, ringSegments]} />
+            <meshBasicMaterial color="#FE6E00" transparent opacity={0.7} />
           </mesh>
 
-          {Array.from({ length: 72 }, (_, i) => {
-            const angle = (i / 72) * Math.PI * 2;
-            const isMajor = i % 6 === 0;
-            const isCardinal = i % 18 === 0;
-            const tickLen = isCardinal ? 0.065 : isMajor ? 0.038 : 0.018;
-            const r = 1.19 + tickLen * 0.5;
-            return (
-              <mesh
-                key={`az-tick-${i}`}
-                position={[Math.cos(angle) * r, 0, Math.sin(angle) * r]}
-                rotation={[0, -angle, 0]}
-              >
-                <boxGeometry
-                  args={[
-                    tickLen,
-                    isCardinal ? 0.012 : 0.006,
-                    isCardinal ? 0.014 : 0.006,
-                  ]}
-                />
-                <meshBasicMaterial
-                  color={
-                    isCardinal
-                      ? "#FE6E00"
-                      : isMajor
-                      ? "#FFB74D"
-                      : "#64748B"
-                  }
-                  transparent
-                  opacity={isCardinal ? 0.95 : isMajor ? 0.75 : 0.4}
-                />
-              </mesh>
-            );
-          })}
+          <lineSegments>
+            <bufferGeometry>
+              <bufferAttribute
+                attach="attributes-position"
+                args={[bezelTicks.positions, 3]}
+              />
+              <bufferAttribute
+                attach="attributes-color"
+                args={[bezelTicks.colors, 3]}
+              />
+            </bufferGeometry>
+            <lineBasicMaterial vertexColors transparent opacity={0.85} />
+          </lineSegments>
 
           <mesh ref={caliperARef} rotation={[Math.PI / 2, 0, 0]}>
-            <torusGeometry args={[1.215, 0.006, 6, 48, Math.PI * 0.38]} />
+            <torusGeometry args={[1.275, 0.005, 6, 48, Math.PI * 0.38]} />
             <meshBasicMaterial
               color="#38BDF8"
               transparent
@@ -914,7 +719,7 @@ export default function GeospatialGlobe({
             />
           </mesh>
           <mesh ref={caliperBRef} rotation={[Math.PI / 2, 0, 0]}>
-            <torusGeometry args={[1.215, 0.005, 6, 48, Math.PI * 0.28]} />
+            <torusGeometry args={[1.275, 0.0045, 6, 48, Math.PI * 0.28]} />
             <meshBasicMaterial
               color="#FE6E00"
               transparent
@@ -927,47 +732,36 @@ export default function GeospatialGlobe({
 
         {/* Meridional Gimbal Ring & Polar Trunnion Spindles */}
         <mesh>
-          <torusGeometry args={[1.25, 0.008, 8, 96]} />
+          <torusGeometry args={[1.25, 0.0075, 10, ringSegments]} />
           <meshStandardMaterial
-            color="#2B3444"
-            metalness={0.85}
+            color="#7C8898"
+            metalness={1}
             roughness={0.3}
           />
         </mesh>
-        <mesh>
-          <torusGeometry args={[1.235, 0.0025, 6, 96]} />
-          <meshBasicMaterial color="#38BDF8" transparent opacity={0.35} />
-        </mesh>
 
         {[1, -1].map((pole) => (
-          <group key={`pole-${pole}`} position={[0, pole * 1.12, 0]}>
+          <group key={`pole-${pole}`} position={[0, pole * 1.2, 0]}>
             <mesh>
-              <cylinderGeometry args={[0.048, 0.062, 0.09, 12]} />
+              <cylinderGeometry
+                args={pole > 0 ? [0.03, 0.05, 0.1, 20] : [0.05, 0.03, 0.1, 20]}
+              />
               <meshStandardMaterial
-                color="#1E2530"
-                metalness={0.9}
-                roughness={0.22}
+                color="#3A4556"
+                metalness={1}
+                roughness={0.28}
               />
             </mesh>
-            <mesh position={[0, pole * 0.025, 0]} rotation={[Math.PI / 2, 0, 0]}>
-              <torusGeometry args={[0.056, 0.006, 6, 20]} />
+            <mesh position={[0, -pole * 0.05, 0]} rotation={[Math.PI / 2, 0, 0]}>
+              <torusGeometry args={[0.052, 0.005, 8, 28]} />
               <meshBasicMaterial color={pole > 0 ? "#FE6E00" : "#38BDF8"} />
             </mesh>
-            <mesh position={[0, pole * 0.09, 0]}>
-              <cylinderGeometry args={[0.014, 0.014, 0.24, 8]} />
+            <mesh position={[0, pole * 0.11, 0]}>
+              <cylinderGeometry args={[0.011, 0.011, 0.16, 12]} />
               <meshStandardMaterial
-                color="#94A3B8"
-                metalness={0.92}
-                roughness={0.2}
-              />
-            </mesh>
-            <mesh position={[0, -pole * 0.06, 0]} rotation={[Math.PI / 2, 0, 0]}>
-              <ringGeometry args={[0.11, 0.135, 24]} />
-              <meshBasicMaterial
-                color={pole > 0 ? "#FE6E00" : "#38BDF8"}
-                side={THREE.DoubleSide}
-                transparent
-                opacity={0.45}
+                color="#C3CDD9"
+                metalness={1}
+                roughness={0.18}
               />
             </mesh>
           </group>
@@ -975,12 +769,12 @@ export default function GeospatialGlobe({
       </group>
 
       {/* =====================================================================
-          3. THREE-SATELLITE ORBITAL CONSTELLATION (WITH NADIR GROUND TRACKS)
+          3. ORBITAL CONSTELLATION (WITH NADIR GROUND TRACKS)
       ===================================================================== */}
       <group ref={satOrbit1Ref} rotation={[0.52, 0.25, 0.65]}>
         <mesh rotation={[Math.PI / 2, 0, 0]}>
-          <torusGeometry args={[1.34, 0.0022, 6, 96]} />
-          <meshBasicMaterial color="#FE6E00" transparent opacity={0.38} />
+          <torusGeometry args={[1.34, 0.0018, 6, ringSegments]} />
+          <meshBasicMaterial color="#FE6E00" transparent opacity={0.34} />
         </mesh>
         <OrbitalSatelliteUnit
           radius={1.34}
@@ -991,8 +785,8 @@ export default function GeospatialGlobe({
 
       <group ref={satOrbit2Ref} rotation={[-0.44, -0.35, -0.52]}>
         <mesh rotation={[Math.PI / 2, 0, 0]}>
-          <torusGeometry args={[1.42, 0.002, 6, 96]} />
-          <meshBasicMaterial color="#38BDF8" transparent opacity={0.32} />
+          <torusGeometry args={[1.42, 0.0016, 6, ringSegments]} />
+          <meshBasicMaterial color="#38BDF8" transparent opacity={0.28} />
         </mesh>
         <OrbitalSatelliteUnit
           radius={1.42}
@@ -1001,28 +795,30 @@ export default function GeospatialGlobe({
         />
       </group>
 
-      <group ref={satOrbit3Ref} rotation={[0.18, 0.6, 0.12]}>
-        <mesh rotation={[Math.PI / 2, 0, 0]}>
-          <torusGeometry args={[1.49, 0.0018, 6, 96]} />
-          <meshBasicMaterial color="#FFB74D" transparent opacity={0.24} />
-        </mesh>
-        <OrbitalSatelliteUnit
-          radius={1.49}
-          accentColor="#FFB74D"
-          solarColor="#0284C7"
-        />
-      </group>
+      {!lite && (
+        <group ref={satOrbit3Ref} rotation={[0.18, 0.6, 0.12]}>
+          <mesh rotation={[Math.PI / 2, 0, 0]}>
+            <torusGeometry args={[1.49, 0.0014, 6, ringSegments]} />
+            <meshBasicMaterial color="#FFB74D" transparent opacity={0.22} />
+          </mesh>
+          <OrbitalSatelliteUnit
+            radius={1.49}
+            accentColor="#FFB74D"
+            solarColor="#0284C7"
+          />
+        </group>
+      )}
 
       {/* =====================================================================
           4. SUB-ORBITAL HOLOGRAPHIC PROJECTION PEDESTAL
       ===================================================================== */}
       <group
         ref={baseRingsRef}
-        position={[0, -1.36, 0]}
+        position={[0, -1.4, 0]}
         rotation={[Math.PI / 2, 0, 0]}
       >
         <mesh>
-          <ringGeometry args={[0.52, 0.55, 48]} />
+          <ringGeometry args={[0.53, 0.55, 64]} />
           <meshBasicMaterial
             color="#FE6E00"
             side={THREE.DoubleSide}
@@ -1033,7 +829,7 @@ export default function GeospatialGlobe({
           />
         </mesh>
         <mesh>
-          <ringGeometry args={[0.78, 0.8, 64]} />
+          <ringGeometry args={[0.79, 0.8, 80]} />
           <meshBasicMaterial
             color="#38BDF8"
             side={THREE.DoubleSide}
