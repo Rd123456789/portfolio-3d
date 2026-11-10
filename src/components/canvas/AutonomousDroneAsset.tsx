@@ -2,228 +2,300 @@
 
 import React, { useRef, useMemo, useEffect } from "react";
 import { useFrame } from "@react-three/fiber";
+import { RoundedBox } from "@react-three/drei";
 import * as THREE from "three";
 import { Project } from "@/lib/projects";
-import { createDiscMaterial, tickDiscMaterial } from "@/lib/shaders";
+import {
+  createRotorDiscMaterial,
+  createScanCurtainMaterial,
+  createTerrainDeckMaterial,
+  setUniform,
+  setUniformColor,
+} from "@/lib/shaders";
 
 interface AutonomousDroneAssetProps {
   activeProject?: Project | null;
   position?: [number, number, number];
   scale?: number;
+  /** Lighter build for phones: coarser terrain mesh and fewer segments. */
+  lite?: boolean;
+}
+
+const PROJECT_THEME: Record<string, string> = {
+  "cspdcl-gis": "#FE6E00", // Signal Orange
+  "track-fields": "#38BDF8", // Telemetry Cyan
+  "kishan-guru": "#10B981", // Agri Emerald
+  "solar-mapping": "#FFB74D", // Solar Gold
+};
+
+// Where each project's diorama sits on the survey deck, as [x, z]
+const SECTOR_TARGET: Record<string, [number, number]> = {
+  "cspdcl-gis": [-0.52, -0.42],
+  "solar-mapping": [0.54, -0.42],
+  "kishan-guru": [-0.52, 0.46],
+  "track-fields": [0.52, 0.46],
+};
+
+const DECK_WIDTH = 2.36;
+const DECK_DEPTH = 2.16;
+const DECK_Y = -0.96;
+const TERRAIN_PEAK = 0.3;
+const HOVER_Y = 0.66;
+const ROTOR_RADIUS = 0.62;
+const AIRFRAME_SCALE = 1.14;
+
+// LiDAR emitter under the gimbal, in the airframe's own coordinates
+const EMITTER: [number, number, number] = [0, -0.37, 0.24];
+
+const UP = new THREE.Vector3(0, 1, 0);
+
+/** Places a unit-height cylinder so it spans from `a` to `b`. */
+function strut(a: [number, number, number], b: [number, number, number]) {
+  const va = new THREE.Vector3(...a);
+  const vb = new THREE.Vector3(...b);
+  const dir = vb.clone().sub(va);
+  return {
+    position: va.clone().add(vb).multiplyScalar(0.5),
+    quaternion: new THREE.Quaternion().setFromUnitVectors(
+      UP,
+      dir.clone().normalize()
+    ),
+    length: dir.length(),
+  };
+}
+
+/** Elevation of the surveyed terrain at normalised deck coordinates (-1..1). */
+function terrainHeight(nx: number, nz: number): number {
+  const ridge1 =
+    Math.exp(-((nx + 0.35) ** 2 * 3.2 + (nz + 0.25) ** 2 * 2.8)) * 0.26;
+  const ridge2 =
+    Math.exp(-((nx - 0.4) ** 2 * 3.5 + (nz - 0.3) ** 2 * 3.0)) * 0.2;
+  const wave = Math.sin(nx * 3.5) * Math.cos(nz * 3.2) * 0.04;
+  return Math.max(0.01, ridge1 + ridge2 + wave + 0.03);
+}
+
+/** Terrain elevation at a point given in deck coordinates. */
+function deckHeight(x: number, z: number): number {
+  return terrainHeight((x / DECK_WIDTH) * 2, (z / DECK_DEPTH) * 2);
+}
+
+/** A rectangular parcel draped over the relief, a hair above the surface. */
+function buildDrapedParcel(
+  cx: number,
+  cz: number,
+  width: number,
+  depth: number
+): THREE.BufferGeometry {
+  const geometry = new THREE.PlaneGeometry(width, depth, 16, 2);
+  geometry.rotateX(-Math.PI / 2);
+  geometry.translate(cx, 0, cz);
+  const pos = geometry.attributes.position as THREE.BufferAttribute;
+  for (let i = 0; i < pos.count; i++) {
+    pos.setY(i, deckHeight(pos.getX(i), pos.getZ(i)) + 0.007);
+  }
+  geometry.computeVertexNormals();
+  return geometry;
+}
+
+/** A closed boundary traced over the relief, as line-segment vertex pairs. */
+function buildDrapedBoundary(corners: [number, number][]): Float32Array {
+  const out: number[] = [];
+  const steps = 14;
+  corners.forEach(([x0, z0], i) => {
+    const [x1, z1] = corners[(i + 1) % corners.length];
+    for (let s = 0; s < steps; s++) {
+      for (const t of [s / steps, (s + 1) / steps]) {
+        const x = x0 + (x1 - x0) * t;
+        const z = z0 + (z1 - z0) * t;
+        out.push(x, deckHeight(x, z) + 0.012, z);
+      }
+    }
+  });
+  return new Float32Array(out);
 }
 
 /**
- * Builds a 3D topographic relief wireframe grid + elevation point cloud for the
- * isometric survey deck beneath the UAV.
+ * The digital-twin surface: a displaced, lit mesh whose rim drops to the deck
+ * so the relief reads as a solid milled block rather than a floating sheet.
  */
-function buildTerrainGrid(
-  cols: number,
-  rows: number,
-  width: number,
-  depth: number
-): {
-  linePositions: Float32Array;
-  pointPositions: Float32Array;
-  pointColors: Float32Array;
-} {
-  const heightAt = (nx: number, nz: number) => {
-    const ridge1 =
-      Math.exp(-((nx + 0.35) ** 2 * 3.2 + (nz + 0.25) ** 2 * 2.8)) * 0.26;
-    const ridge2 =
-      Math.exp(-((nx - 0.4) ** 2 * 3.5 + (nz - 0.3) ** 2 * 3.0)) * 0.2;
-    const wave = Math.sin(nx * 3.5) * Math.cos(nz * 3.2) * 0.04;
-    return Math.max(0.01, ridge1 + ridge2 + wave + 0.03);
-  };
+function buildTerrainSurface(cols: number, rows: number): THREE.BufferGeometry {
+  const geometry = new THREE.PlaneGeometry(DECK_WIDTH, DECK_DEPTH, cols, rows);
+  geometry.rotateX(-Math.PI / 2);
 
-  const lineVerts: number[] = [];
-  const ptVerts: number[] = [];
-  const ptCols: number[] = [];
+  const pos = geometry.attributes.position as THREE.BufferAttribute;
+  for (let i = 0; i < pos.count; i++) {
+    const nx = (pos.getX(i) / DECK_WIDTH) * 2;
+    const nz = (pos.getZ(i) / DECK_DEPTH) * 2;
+    const onRim = Math.abs(nx) > 0.9999 || Math.abs(nz) > 0.9999;
+    pos.setY(i, onRim ? 0 : terrainHeight(nx, nz));
+  }
+  geometry.computeVertexNormals();
+  return geometry;
+}
 
-  const lowCol = new THREE.Color("#1E3A5F");
-  const midCol = new THREE.Color("#38BDF8");
-  const highCol = new THREE.Color("#FE6E00");
-  const tmpCol = new THREE.Color();
+/** Fan with its apex at the origin, reaching one unit down and one unit wide. */
+function buildCurtainFan(): THREE.BufferGeometry {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute(
+    "position",
+    new THREE.BufferAttribute(
+      new Float32Array([0, 0, 0, -1, -1, 0, 1, -1, 0]),
+      3
+    )
+  );
+  geometry.setAttribute(
+    "uv",
+    new THREE.BufferAttribute(new Float32Array([0.5, 0, 0, 1, 1, 1]), 2)
+  );
+  return geometry;
+}
 
-  const getPos = (c: number, r: number): [number, number, number] => {
-    const u = c / (cols - 1) - 0.5;
-    const v = r / (rows - 1) - 0.5;
-    const x = u * width;
-    const z = v * depth;
-    const y = heightAt(u * 2, v * 2);
-    return [x, y, z];
-  };
+// Sector A: three distribution pylons stepping across the north-west ridge
+const PYLONS: [number, number][] = [
+  [-0.92, -0.68],
+  [-0.5, -0.36],
+  [-0.08, -0.1],
+];
+const PYLON_HEIGHT = 0.22;
 
-  for (let r = 0; r < rows; r++) {
-    for (let c = 0; c < cols; c++) {
-      const [x, y, z] = getPos(c, r);
-      ptVerts.push(x, y + 0.006, z);
-
-      const t = Math.min(1, y / 0.28);
-      if (t < 0.5) {
-        tmpCol.copy(lowCol).lerp(midCol, t * 2);
-      } else {
-        tmpCol.copy(midCol).lerp(highCol, (t - 0.5) * 2);
-      }
-      ptCols.push(tmpCol.r, tmpCol.g, tmpCol.b);
-
-      if (c < cols - 1) {
-        const [nx, ny, nz] = getPos(c + 1, r);
-        lineVerts.push(x, y, z, nx, ny, nz);
-      }
-      if (r < rows - 1) {
-        const [nx, ny, nz] = getPos(c, r + 1);
-        lineVerts.push(x, y, z, nx, ny, nz);
+/** Twin catenary conductors strung between the diorama's three pylons. */
+function buildMiniGridLines(): Float32Array {
+  const tops = PYLONS.map(
+    ([x, z]) => new THREE.Vector3(x, deckHeight(x, z) + PYLON_HEIGHT * 0.8, z)
+  );
+  const verts: number[] = [];
+  for (let p = 0; p < tops.length - 1; p++) {
+    for (const offset of [-0.055, 0.055]) {
+      const a = tops[p].clone().add(new THREE.Vector3(0, 0, offset));
+      const b = tops[p + 1].clone().add(new THREE.Vector3(0, 0, offset));
+      const mid = a.clone().add(b).multiplyScalar(0.5);
+      mid.y -= 0.045;
+      const pts = new THREE.QuadraticBezierCurve3(a, mid, b).getPoints(10);
+      for (let i = 0; i < pts.length - 1; i++) {
+        verts.push(pts[i].x, pts[i].y, pts[i].z);
+        verts.push(pts[i + 1].x, pts[i + 1].y, pts[i + 1].z);
       }
     }
   }
-
-  return {
-    linePositions: new Float32Array(lineVerts),
-    pointPositions: new Float32Array(ptVerts),
-    pointColors: new Float32Array(ptCols),
-  };
+  return new Float32Array(verts);
 }
+
+// Sector C: four NDVI crop rows. Sector D: a surveyed field boundary.
+const CROP_ROWS = [-0.22, -0.07, 0.08, 0.23].map((dz) => 0.48 + dz);
+const GPS_CORNERS: [number, number][] = [
+  [0.24, 0.26],
+  [0.8, 0.26],
+  [0.8, 0.7],
+  [0.24, 0.7],
+];
+
+/** Compass graduations around the diorama as one line-segment batch. */
+function buildCompassTicks(radius: number): Float32Array {
+  const out: number[] = [];
+  for (let i = 0; i < 48; i++) {
+    const a = (i / 48) * Math.PI * 2;
+    const length = i % 12 === 0 ? 0.11 : i % 4 === 0 ? 0.06 : 0.028;
+    out.push(
+      Math.cos(a) * (radius - length),
+      0,
+      Math.sin(a) * (radius - length),
+      Math.cos(a) * radius,
+      0,
+      Math.sin(a) * radius
+    );
+  }
+  return new Float32Array(out);
+}
+
+// Motor positions: front pair forward (-Z), port side on -X
+const ARMS = [
+  { x: 0.88, z: -0.84, dir: 1, isPort: false },
+  { x: -0.88, z: -0.84, dir: -1, isPort: true },
+  { x: -0.88, z: 0.84, dir: 1, isPort: true },
+  { x: 0.88, z: 0.84, dir: -1, isPort: false },
+].map((arm) => ({
+  ...arm,
+  boom: strut(
+    [Math.sign(arm.x) * 0.22, 0.02, Math.sign(arm.z) * 0.38],
+    [arm.x, 0.07, arm.z]
+  ),
+}));
+
+const SKID_STRUTS = [-1, 1].flatMap((side) =>
+  [-0.26, 0.26].map((z) => ({
+    key: `${side}-${z}`,
+    ...strut([side * 0.2, -0.07, z], [side * 0.43, -0.36, z * 1.25]),
+  }))
+);
 
 export default function AutonomousDroneAsset({
   activeProject,
   position = [0, 0, 0],
   scale = 1.0,
+  lite = false,
 }: AutonomousDroneAssetProps) {
   const rootGroupRef = useRef<THREE.Group>(null!);
   const droneBodyRef = useRef<THREE.Group>(null!);
   const gimbalRef = useRef<THREE.Group>(null!);
   const laserCurtainRef = useRef<THREE.Group>(null!);
-  const scanLineBarRef = useRef<THREE.Mesh>(null!);
   const targetReticleRef = useRef<THREE.Group>(null!);
   const waypointDiamondRef = useRef<THREE.Mesh>(null!);
-  const orbitalRingRef = useRef<THREE.Group>(null!);
-
-  const rotorRefs = [
-    useRef<THREE.Group>(null!),
-    useRef<THREE.Group>(null!),
-    useRef<THREE.Group>(null!),
-    useRef<THREE.Group>(null!),
-  ];
-  const downwashRefs = [
-    useRef<THREE.Mesh>(null!),
-    useRef<THREE.Mesh>(null!),
-    useRef<THREE.Mesh>(null!),
-    useRef<THREE.Mesh>(null!),
-  ];
+  const compassRingRef = useRef<THREE.Group>(null!);
+  const strobeRef = useRef<THREE.Mesh>(null!);
+  const rotorRefs = useRef<(THREE.Group | null)[]>([]);
 
   // Match exact project IDs from src/lib/projects.ts
   const projectId = activeProject?.id ?? "cspdcl-gis";
+  const themeColor = PROJECT_THEME[projectId] ?? "#FE6E00";
+  const sectorTarget = SECTOR_TARGET[projectId] ?? [0, 0];
 
-  const themeColor = useMemo(() => {
-    if (!activeProject) return "#FE6E00";
-    if (activeProject.id === "cspdcl-gis") return "#FE6E00"; // Signal Orange
-    if (activeProject.id === "track-fields") return "#38BDF8"; // Telemetry Cyan
-    if (activeProject.id === "kishan-guru") return "#10B981"; // Agri Emerald
-    if (activeProject.id === "solar-mapping") return "#FFB74D"; // Solar Gold
-    return "#FE6E00";
-  }, [activeProject]);
+  const terrainGeometry = useMemo(
+    () => (lite ? buildTerrainSurface(56, 52) : buildTerrainSurface(104, 96)),
+    [lite]
+  );
+  const curtainGeometry = useMemo(() => buildCurtainFan(), []);
+  const miniGridLines = useMemo(() => buildMiniGridLines(), []);
+  const cropParcels = useMemo(
+    () => CROP_ROWS.map((z) => buildDrapedParcel(-0.54, z, 0.74, 0.1)),
+    []
+  );
+  const gpsBoundary = useMemo(() => buildDrapedBoundary(GPS_CORNERS), []);
+  const compassTicks = useMemo(() => buildCompassTicks(1.95), []);
 
-  // Target coordinates on the terrain deck for each project sector
-  const sectorTarget = useMemo((): [number, number] => {
-    if (projectId === "cspdcl-gis") return [-0.52, -0.42];
-    if (projectId === "solar-mapping") return [0.54, -0.42];
-    if (projectId === "kishan-guru") return [-0.52, 0.46];
-    if (projectId === "track-fields") return [0.52, 0.46];
-    return [0, 0];
-  }, [projectId]);
-
-  const armConfigs = useMemo(
-    () => [
-      { x: 1.02, z: -0.96, angle: -Math.PI / 4, dir: 1, isFront: true, isPort: false },
-      { x: -1.02, z: -0.96, angle: Math.PI / 4, dir: -1, isFront: true, isPort: true },
-      { x: -1.02, z: 0.96, angle: (3 * Math.PI) / 4, dir: 1, isFront: false, isPort: true },
-      { x: 1.02, z: 0.96, angle: -(3 * Math.PI) / 4, dir: -1, isFront: false, isPort: false },
-    ],
+  // Built once, then re-tinted in place when the active project changes
+  const rotorDiscMaterial = useMemo(() => createRotorDiscMaterial(), []);
+  const curtainMaterial = useMemo(
+    () => createScanCurtainMaterial("#FE6E00"),
+    []
+  );
+  const terrainMaterial = useMemo(
+    () => createTerrainDeckMaterial({ theme: "#FE6E00", maxHeight: TERRAIN_PEAK }),
     []
   );
 
-  const terrainData = useMemo(() => buildTerrainGrid(19, 19, 2.36, 2.16), []);
-
-  const curtainGeometry = useMemo(() => {
-    const geom = new THREE.BufferGeometry();
-    const vertices = new Float32Array([
-      0, 0, 0,
-      -1.08, -1.28, 0,
-      1.08, -1.28, 0,
-    ]);
-    geom.setAttribute("position", new THREE.BufferAttribute(vertices, 3));
-    return geom;
-  }, []);
-
-  const curtainRaysGeometry = useMemo(() => {
-    const geom = new THREE.BufferGeometry();
-    const pts: number[] = [];
-    const rayCount = 9;
-    for (let i = 0; i < rayCount; i++) {
-      const t = i / (rayCount - 1) - 0.5;
-      pts.push(0, 0, 0, t * 2.16, -1.28, 0);
-    }
-    geom.setAttribute(
-      "position",
-      new THREE.BufferAttribute(new Float32Array(pts), 3)
-    );
-    return geom;
-  }, []);
-
-  const miniGridLines = useMemo(() => {
-    const pylons = [
-      new THREE.Vector3(-0.92, 0.34, -0.68),
-      new THREE.Vector3(-0.5, 0.42, -0.36),
-      new THREE.Vector3(-0.08, 0.34, -0.1),
-    ];
-    const verts: number[] = [];
-    for (let p = 0; p < pylons.length - 1; p++) {
-      for (const offset of [-0.055, 0.055]) {
-        const a = pylons[p].clone().add(new THREE.Vector3(0, 0, offset));
-        const b = pylons[p + 1].clone().add(new THREE.Vector3(0, 0, offset));
-        const mid = a.clone().add(b).multiplyScalar(0.5);
-        mid.y -= 0.045;
-        const curve = new THREE.QuadraticBezierCurve3(a, mid, b);
-        const pts = curve.getPoints(10);
-        for (let i = 0; i < pts.length - 1; i++) {
-          verts.push(
-            pts[i].x,
-            pts[i].y,
-            pts[i].z,
-            pts[i + 1].x,
-            pts[i + 1].y,
-            pts[i + 1].z
-          );
-        }
-      }
-    }
-    return new Float32Array(verts);
-  }, []);
-
-  const gpsBoundaryLines = useMemo(
-    () =>
-      new Float32Array([
-        -0.28, 0.05, -0.22, 0.28, 0.05, -0.22,
-        0.28, 0.05, -0.22, 0.28, 0.05, 0.22,
-        0.28, 0.05, 0.22, -0.28, 0.05, 0.22,
-        -0.28, 0.05, 0.22, -0.28, 0.05, -0.22,
-      ]),
-    []
-  );
-
-  const rotorBlurMaterial = useMemo(
-    () => createDiscMaterial({ color: themeColor, intensity: 0.85, streaks: 4 }),
-    [themeColor]
-  );
+  useEffect(() => {
+    setUniformColor(rotorDiscMaterial, "uColor", themeColor);
+    setUniformColor(curtainMaterial, "uColor", themeColor);
+    setUniformColor(terrainMaterial, "uTheme", themeColor);
+  }, [themeColor, rotorDiscMaterial, curtainMaterial, terrainMaterial]);
 
   useEffect(
     () => () => {
-      rotorBlurMaterial.dispose();
+      rotorDiscMaterial.dispose();
+      curtainMaterial.dispose();
+      terrainMaterial.dispose();
       curtainGeometry.dispose();
-      curtainRaysGeometry.dispose();
+      cropParcels.forEach((g) => g.dispose());
     },
-    [rotorBlurMaterial, curtainGeometry, curtainRaysGeometry]
+    [
+      rotorDiscMaterial,
+      curtainMaterial,
+      terrainMaterial,
+      curtainGeometry,
+      cropParcels,
+    ]
   );
+  useEffect(() => () => terrainGeometry.dispose(), [terrainGeometry]);
 
   useFrame((state, delta) => {
     const t = state.clock.getElapsedTime();
@@ -248,57 +320,45 @@ export default function AutonomousDroneAsset({
     }
 
     // 2. UAV precision hover & subtle flight banking
-    if (droneBodyRef.current) {
-      const hoverY = 0.66 + Math.sin(t * 2.1) * 0.045;
-      const hoverX = Math.sin(t * 0.9) * 0.06;
-      droneBodyRef.current.position.y = hoverY;
-      droneBodyRef.current.position.x = hoverX;
+    const hoverY = HOVER_Y + Math.sin(t * 2.1) * 0.04;
+    const body = droneBodyRef.current;
+    if (body) {
+      body.position.y = hoverY;
+      body.position.x = Math.sin(t * 0.9) * 0.06;
 
       const bankZ = -Math.cos(t * 0.9) * 0.045 - state.pointer.x * 0.08;
-      const pitchX = 0.08 + Math.sin(t * 1.1) * 0.025;
-      droneBodyRef.current.rotation.z = THREE.MathUtils.damp(
-        droneBodyRef.current.rotation.z,
-        bankZ,
-        5,
-        delta
-      );
-      droneBodyRef.current.rotation.x = THREE.MathUtils.damp(
-        droneBodyRef.current.rotation.x,
-        pitchX,
-        5,
-        delta
-      );
+      const pitchX = 0.07 + Math.sin(t * 1.1) * 0.025;
+      body.rotation.z = THREE.MathUtils.damp(body.rotation.z, bankZ, 5, delta);
+      body.rotation.x = THREE.MathUtils.damp(body.rotation.x, pitchX, 5, delta);
     }
 
-    // 3. High-velocity rotor rotation, downwash vortex rings & shader streaks
-    rotorRefs.forEach((ref, idx) => {
-      if (ref.current) {
-        ref.current.rotation.y += delta * 45 * armConfigs[idx].dir;
-      }
-      const ring = downwashRefs[idx].current;
-      if (ring) {
-        const phase = (t * 2.1 + idx * 0.25) % 1;
-        ring.position.y = -0.05 - phase * 0.42;
-        ring.scale.setScalar(0.68 + phase * 0.6);
-        (ring.material as THREE.MeshBasicMaterial).opacity = 0.28 * (1 - phase);
-      }
+    // 3. Rotors. Alternate pairs counter-rotate, as on a real quad.
+    rotorRefs.current.forEach((rotor, idx) => {
+      if (rotor) rotor.rotation.y += delta * 34 * ARMS[idx].dir;
     });
-    tickDiscMaterial(rotorBlurMaterial, t);
 
-    // 4. Sweeping LiDAR Laser Curtain & Terrain Scan-Bar Synchronization
-    const scanSweepZ = Math.sin(t * 1.35) * 0.86;
-    const sweepAngleX = Math.atan2(scanSweepZ, 1.28);
+    // 4. LiDAR sweep: the terrain shader paints the return line, and the
+    //    curtain is aimed from the emitter to exactly that line on the deck.
+    const sweep = Math.sin(t * 1.05);
+    const scanZ = sweep * (DECK_DEPTH / 2 - 0.1);
+    setUniform(terrainMaterial, "uScanZ", scanZ);
+    setUniform(terrainMaterial, "uScanDir", Math.cos(t * 1.05) >= 0 ? 1 : -1);
 
-    if (laserCurtainRef.current) {
-      laserCurtainRef.current.rotation.x = sweepAngleX;
+    if (laserCurtainRef.current && body) {
+      const drop = hoverY + EMITTER[1] * AIRFRAME_SCALE - (DECK_Y + 0.07);
+      const reach = scanZ - EMITTER[2] * AIRFRAME_SCALE;
+      const curtain = laserCurtainRef.current;
+      curtain.rotation.x = -Math.atan2(reach, drop) - body.rotation.x;
+      curtain.scale.set(
+        (DECK_WIDTH / 2 - 0.04) / AIRFRAME_SCALE,
+        Math.hypot(reach, drop) / AIRFRAME_SCALE,
+        1
+      );
     }
-    if (scanLineBarRef.current) {
-      scanLineBarRef.current.position.z = scanSweepZ;
-    }
 
-    // 5. Gimbal tracks active project sector smoothly
+    // 5. Gimbal tracks the active project sector
     if (gimbalRef.current) {
-      const targetYaw = state.pointer.x * 0.25 + sectorTarget[0] * 0.22;
+      const targetYaw = state.pointer.x * 0.25 + sectorTarget[0] * 0.5;
       gimbalRef.current.rotation.y = THREE.MathUtils.damp(
         gimbalRef.current.rotation.y,
         targetYaw,
@@ -321,18 +381,45 @@ export default function AutonomousDroneAsset({
         5,
         delta
       );
+      targetReticleRef.current.position.y = THREE.MathUtils.damp(
+        targetReticleRef.current.position.y,
+        deckHeight(sectorTarget[0], sectorTarget[1]) + 0.09,
+        5,
+        delta
+      );
       targetReticleRef.current.rotation.y = t * 0.8;
     }
     if (waypointDiamondRef.current) {
       waypointDiamondRef.current.rotation.y = -t * 1.8;
-      waypointDiamondRef.current.position.y = 0.28 + Math.sin(t * 3.0) * 0.035;
+      waypointDiamondRef.current.position.y = 0.3 + Math.sin(t * 3.0) * 0.03;
     }
 
-    // 7. Orbital telemetry compass bezel slow rotation
-    if (orbitalRingRef.current) {
-      orbitalRingRef.current.rotation.y = t * 0.16;
+    // 7. Anti-collision strobe: a short double flash each second
+    if (strobeRef.current) {
+      const beat = t % 1.1;
+      const on = beat < 0.07 || (beat > 0.16 && beat < 0.23);
+      (
+        strobeRef.current.material as THREE.MeshStandardMaterial
+      ).emissiveIntensity = on ? 9 : 0.6;
     }
+
+    if (compassRingRef.current) compassRingRef.current.rotation.y = t * 0.16;
   });
+
+  const carbon = (
+    <meshStandardMaterial color="#232A35" metalness={0.6} roughness={0.36} />
+  );
+  const steel = (
+    <meshStandardMaterial color="#AEB8C5" metalness={1} roughness={0.26} />
+  );
+  const glow = (intensity: number) => (
+    <meshStandardMaterial
+      color={themeColor}
+      emissive={themeColor}
+      emissiveIntensity={intensity}
+      toneMapped={false}
+    />
+  );
 
   return (
     <group
@@ -341,389 +428,320 @@ export default function AutonomousDroneAsset({
       scale={scale}
       rotation={[0.36, -0.38, 0]}
     >
-      {/* Dynamic project-accent key light */}
+      {/* Project-accent fill: tints the scene without drowning the materials */}
       <pointLight
-        position={[0, 0.8, 1.5]}
-        intensity={4.5}
+        position={[0.4, 0.2, 1.6]}
+        intensity={1.3}
         color={themeColor}
-        distance={9}
+        distance={7}
       />
 
       {/* =====================================================================
           TIER 1: INDUSTRIAL AUTONOMOUS SURVEY UAV (HOVERING ABOVE DECK)
       ===================================================================== */}
-      <group ref={droneBodyRef} position={[0, 0.66, 0]}>
-        {/* 1. Sculpted Carbon-Composite Main Fuselage */}
-        <mesh position={[0, 0, 0]}>
-          <boxGeometry args={[0.68, 0.2, 1.08]} />
+      <group
+        ref={droneBodyRef}
+        position={[0, HOVER_Y, 0]}
+        scale={AIRFRAME_SCALE}
+      >
+        {/* The airframe is modelled nose-to-(-Z); turn it to face the viewer */}
+        <group rotation={[0, Math.PI, 0]}>
+        {/* 1. Airframe: carbon chassis under a light composite weather shell */}
+        <RoundedBox
+          args={[0.6, 0.16, 1.04]}
+          radius={0.07}
+          smoothness={4}
+          position={[0, -0.015, 0]}
+        >
+          {carbon}
+        </RoundedBox>
+
+        <RoundedBox
+          args={[0.56, 0.15, 0.9]}
+          radius={0.07}
+          smoothness={5}
+          position={[0, 0.085, -0.03]}
+        >
           <meshStandardMaterial
-            color="#262F3D"
-            metalness={0.55}
-            roughness={0.32}
+            color="#D7DDE5"
+            metalness={0.12}
+            roughness={0.36}
           />
+        </RoundedBox>
+
+        {/* Recessed battery hatch with a status bar and charge telltales */}
+        <RoundedBox
+          args={[0.27, 0.02, 0.4]}
+          radius={0.009}
+          smoothness={2}
+          position={[0, 0.158, 0.12]}
+        >
+          <meshStandardMaterial color="#12161C" metalness={0.1} roughness={0.6} />
+        </RoundedBox>
+        {[0, 1, 2, 3].map((cell) => (
+          <mesh key={`cell-${cell}`} position={[-0.075 + cell * 0.05, 0.17, 0.27]}>
+            <boxGeometry args={[0.032, 0.006, 0.014]} />
+            <meshBasicMaterial color="#10B981" toneMapped={false} />
+          </mesh>
+        ))}
+        <mesh position={[0, 0.17, -0.02]}>
+          <boxGeometry args={[0.2, 0.006, 0.016]} />
+          {glow(2.4)}
         </mesh>
 
-        {/* Chamfered Upper Avionics Canopy */}
-        <mesh position={[0, 0.13, -0.02]}>
-          <boxGeometry args={[0.52, 0.1, 0.84]} />
-          <meshStandardMaterial
-            color="#333F52"
-            metalness={0.62}
-            roughness={0.26}
-          />
-        </mesh>
-
-        {/* Sculpted Aerodynamic Nose Cone */}
-        <mesh position={[0, 0.02, -0.6]} rotation={[-0.18, 0, 0]}>
-          <boxGeometry args={[0.54, 0.15, 0.22]} />
-          <meshStandardMaterial
-            color="#2B3545"
-            metalness={0.65}
-            roughness={0.28}
-          />
-        </mesh>
-
-        {/* Luminous Theme Spine & Side Chines */}
-        <mesh position={[0, 0.185, -0.04]}>
-          <boxGeometry args={[0.16, 0.022, 0.68]} />
-          <meshStandardMaterial
-            color={themeColor}
-            emissive={themeColor}
-            emissiveIntensity={2.2}
-          />
-        </mesh>
+        {/* Theme chines along the shell split line */}
         {[-1, 1].map((side) => (
-          <mesh key={`chine-${side}`} position={[side * 0.345, 0.06, 0]}>
-            <boxGeometry args={[0.016, 0.018, 1.02]} />
-            <meshStandardMaterial
-              color={themeColor}
-              emissive={themeColor}
-              emissiveIntensity={2.8}
-            />
+          <mesh key={`chine-${side}`} position={[side * 0.292, 0.03, -0.02]}>
+            <boxGeometry args={[0.01, 0.014, 0.62]} />
+            {glow(2.6)}
           </mesh>
         ))}
 
-        {/* Forward Binocular Stereo-Vision Obstacle Sensors */}
-        {[-0.16, 0.16].map((xOff, i) => (
-          <group key={`eye-${i}`} position={[xOff, 0.03, -0.71]}>
+        {/* Forward sensor visor: gloss black bar housing the stereo pair */}
+        <RoundedBox
+          args={[0.44, 0.085, 0.07]}
+          radius={0.03}
+          smoothness={3}
+          position={[0, 0.06, -0.485]}
+        >
+          <meshStandardMaterial color="#06080B" metalness={0.9} roughness={0.1} />
+        </RoundedBox>
+        {[-0.12, 0.12].map((xOff) => (
+          <group key={`eye-${xOff}`} position={[xOff, 0.06, -0.522]}>
             <mesh rotation={[Math.PI / 2, 0, 0]}>
-              <cylinderGeometry args={[0.042, 0.042, 0.03, 12]} />
-              <meshStandardMaterial
-                color="#111827"
-                metalness={0.9}
-                roughness={0.2}
-              />
+              <cylinderGeometry args={[0.027, 0.027, 0.012, 20]} />
+              {steel}
             </mesh>
-            <mesh position={[0, 0, -0.017]}>
-              <circleGeometry args={[0.032, 16]} />
-              <meshBasicMaterial color="#38BDF8" />
+            <mesh position={[0, 0, -0.0065]} rotation={[0, Math.PI, 0]}>
+              <circleGeometry args={[0.019, 20]} />
+              <meshBasicMaterial color="#38BDF8" toneMapped={false} />
             </mesh>
           </group>
         ))}
 
-        {/* Dual RTK-GNSS High-Precision Mushroom Antennas */}
-        {[-0.18, 0.18].map((xOff, i) => (
-          <group key={`rtk-${i}`} position={[xOff, 0.22, 0.26]}>
-            <mesh>
-              <cylinderGeometry args={[0.018, 0.022, 0.08, 8]} />
+        {/* Dual RTK-GNSS mushroom antennas */}
+        {[-0.15, 0.15].map((xOff) => (
+          <group key={`rtk-${xOff}`} position={[xOff, 0.16, 0.3]}>
+            <mesh position={[0, 0.03, 0]}>
+              <cylinderGeometry args={[0.012, 0.016, 0.06, 10]} />
+              {steel}
+            </mesh>
+            <mesh position={[0, 0.07, 0]}>
+              <cylinderGeometry args={[0.05, 0.042, 0.026, 24]} />
               <meshStandardMaterial
-                color="#64748B"
-                metalness={0.85}
-                roughness={0.25}
-              />
-            </mesh>
-            <mesh position={[0, 0.045, 0]}>
-              <cylinderGeometry args={[0.062, 0.05, 0.032, 16]} />
-              <meshStandardMaterial
-                color="#F8FAFC"
-                metalness={0.3}
-                roughness={0.3}
-              />
-            </mesh>
-            <mesh position={[0, 0.045, 0]} rotation={[Math.PI / 2, 0, 0]}>
-              <torusGeometry args={[0.06, 0.005, 6, 20]} />
-              <meshBasicMaterial color={themeColor} />
-            </mesh>
-          </group>
-        ))}
-
-        {/* Dorsal Anti-Collision Strobe Dome */}
-        <mesh position={[0, 0.21, -0.28]}>
-          <sphereGeometry args={[0.032, 12, 12]} />
-          <meshStandardMaterial
-            color="#FFFFFF"
-            emissive={themeColor}
-            emissiveIntensity={5}
-          />
-        </mesh>
-
-        {/* Rear Smart LiPo Battery Bay with 4 Telemetry Charge Bars */}
-        <group position={[0, 0.01, 0.55]}>
-          <mesh>
-            <boxGeometry args={[0.44, 0.14, 0.08]} />
-            <meshStandardMaterial color="#181F29" metalness={0.8} roughness={0.3} />
-          </mesh>
-          {[0, 1, 2, 3].map((b) => (
-            <mesh key={`bat-${b}`} position={[-0.12 + b * 0.08, 0, 0.043]}>
-              <boxGeometry args={[0.055, 0.022, 0.008]} />
-              <meshBasicMaterial color="#10B981" />
-            </mesh>
-          ))}
-        </group>
-
-        {/* 2. Wide-Stance Carbon Landing Skids */}
-        {[-1, 1].map((side) => (
-          <group key={`skid-${side}`} position={[side * 0.44, -0.32, 0]}>
-            <mesh rotation={[Math.PI / 2, 0, 0]}>
-              <cylinderGeometry args={[0.02, 0.02, 1.16, 10]} />
-              <meshStandardMaterial
-                color="#1E2530"
-                metalness={0.8}
-                roughness={0.3}
-              />
-            </mesh>
-            {[-0.58, 0.58].map((zEnd, zi) => (
-              <mesh key={zi} position={[0, 0, zEnd]} rotation={[Math.PI / 2, 0, 0]}>
-                <cylinderGeometry args={[0.025, 0.025, 0.07, 10]} />
-                <meshBasicMaterial color={themeColor} />
-              </mesh>
-            ))}
-            {[-0.28, 0.28].map((zStrut, si) => (
-              <mesh
-                key={si}
-                position={[-side * 0.06, 0.16, zStrut]}
-                rotation={[0, 0, side * 0.26]}
-              >
-                <cylinderGeometry args={[0.016, 0.018, 0.36, 8]} />
-                <meshStandardMaterial
-                  color="#334155"
-                  metalness={0.82}
-                  roughness={0.28}
-                />
-              </mesh>
-            ))}
-          </group>
-        ))}
-
-        {/* 3. Four Swept Carbon Booms, Brushless Motors & High-Visibility Rotors */}
-        {armConfigs.map((arm, i) => (
-          <group key={`arm-${i}`}>
-            <mesh
-              position={[arm.x * 0.52, 0.04, arm.z * 0.52]}
-              rotation={[0, arm.angle, Math.PI / 2]}
-            >
-              <cylinderGeometry args={[0.032, 0.038, 1.18, 12]} />
-              <meshStandardMaterial
-                color="#262E3B"
-                metalness={0.68}
+                color="#F1F4F8"
+                metalness={0.1}
                 roughness={0.32}
               />
             </mesh>
+            <mesh position={[0, 0.058, 0]} rotation={[Math.PI / 2, 0, 0]}>
+              <torusGeometry args={[0.046, 0.004, 6, 24]} />
+              {glow(2)}
+            </mesh>
+          </group>
+        ))}
 
-            <mesh
-              position={[arm.x * 0.52, 0.082, arm.z * 0.52]}
-              rotation={[0, arm.angle, Math.PI / 2]}
-            >
-              <boxGeometry args={[0.016, 1.12, 0.016]} />
-              <meshStandardMaterial
-                color={themeColor}
-                emissive={themeColor}
-                emissiveIntensity={2.6}
-              />
+        {/* Dorsal anti-collision strobe */}
+        <mesh ref={strobeRef} position={[0, 0.172, -0.3]}>
+          <sphereGeometry args={[0.022, 12, 10, 0, Math.PI * 2, 0, Math.PI / 2]} />
+          <meshStandardMaterial
+            color="#FFFFFF"
+            emissive="#FFFFFF"
+            emissiveIntensity={0.6}
+            toneMapped={false}
+          />
+        </mesh>
+
+        {/* 2. Landing gear: splayed struts onto capsule skids */}
+        {SKID_STRUTS.map((s) => (
+          <mesh key={`gear-${s.key}`} position={s.position} quaternion={s.quaternion}>
+            <cylinderGeometry args={[0.013, 0.016, s.length, 8]} />
+            {carbon}
+          </mesh>
+        ))}
+        {[-1, 1].map((side) => (
+          <group key={`skid-${side}`} position={[side * 0.43, -0.36, 0]}>
+            <mesh rotation={[Math.PI / 2, 0, 0]}>
+              <capsuleGeometry args={[0.018, 0.9, 4, 10]} />
+              {carbon}
+            </mesh>
+            {[-0.43, 0.43].map((zEnd) => (
+              <mesh key={zEnd} position={[0, 0, zEnd]} rotation={[Math.PI / 2, 0, 0]}>
+                <cylinderGeometry args={[0.0215, 0.0215, 0.07, 12]} />
+                {glow(1.6)}
+              </mesh>
+            ))}
+          </group>
+        ))}
+
+        {/* 3. Tapered carbon booms, brushless motors and rotors */}
+        {ARMS.map((arm, i) => (
+          <group key={`arm-${i}`}>
+            <mesh position={arm.boom.position} quaternion={arm.boom.quaternion}>
+              <cylinderGeometry args={[0.024, 0.04, arm.boom.length, 14]} />
+              {carbon}
             </mesh>
 
-            <group position={[arm.x, 0.08, arm.z]}>
-              <mesh position={[0, -0.04, 0]}>
-                <cylinderGeometry args={[0.105, 0.09, 0.06, 14]} />
-                <meshStandardMaterial
-                  color="#1E2530"
-                  metalness={0.85}
-                  roughness={0.25}
-                />
+            <group position={[arm.x, 0.07, arm.z]}>
+              {/* Arm-end clamp carrying the navigation light */}
+              <mesh position={[0, -0.02, 0]}>
+                <cylinderGeometry args={[0.07, 0.058, 0.05, 20]} />
+                {carbon}
               </mesh>
-              <mesh position={[0, 0.025, 0]}>
-                <cylinderGeometry args={[0.092, 0.095, 0.1, 14]} />
-                <meshStandardMaterial
-                  color={themeColor}
-                  emissive={themeColor}
-                  emissiveIntensity={0.65}
-                  metalness={0.88}
-                  roughness={0.2}
-                />
-              </mesh>
-
-              {/* Navigation LED Beacon */}
-              <mesh position={[arm.x > 0 ? 0.09 : -0.09, -0.04, 0]}>
-                <sphereGeometry args={[0.026, 8, 8]} />
+              <mesh position={[0, -0.056, 0]}>
+                <sphereGeometry args={[0.024, 10, 8]} />
                 <meshBasicMaterial
-                  color={arm.isPort ? "#EF4444" : "#10B981"}
+                  color={arm.isPort ? "#FF3B3B" : "#22E08A"}
+                  toneMapped={false}
                 />
               </mesh>
 
-              {/* Travelling Rotor Downwash Vortex Ring */}
-              <mesh
-                ref={downwashRefs[i]}
-                position={[0, -0.1, 0]}
-                rotation={[Math.PI / 2, 0, 0]}
+              {/* Motor bell with a theme-anodised band */}
+              <mesh position={[0, 0.036, 0]}>
+                <cylinderGeometry args={[0.062, 0.066, 0.064, 24]} />
+                {steel}
+              </mesh>
+              <mesh position={[0, 0.036, 0]}>
+                <cylinderGeometry args={[0.0675, 0.0675, 0.018, 24]} />
+                {glow(1.1)}
+              </mesh>
+
+              {/* Spinning hub, blades and their motion smear */}
+              <group
+                ref={(el) => {
+                  rotorRefs.current[i] = el;
+                }}
+                position={[0, 0.088, 0]}
               >
-                <ringGeometry args={[0.35, 0.4, 24]} />
-                <meshBasicMaterial
-                  color={themeColor}
-                  transparent
-                  opacity={0.22}
-                  side={THREE.DoubleSide}
-                  blending={THREE.AdditiveBlending}
-                  depthWrite={false}
-                />
-              </mesh>
-
-              {/* Spinning Propeller Hub, Carbon Blades & Shader Blur Disc */}
-              <group ref={rotorRefs[i]} position={[0, 0.095, 0]}>
                 <mesh>
-                  <cylinderGeometry args={[0.03, 0.042, 0.055, 12]} />
-                  <meshStandardMaterial
-                    color="#E2E8F0"
-                    metalness={0.92}
-                    roughness={0.18}
-                  />
+                  <cylinderGeometry args={[0.016, 0.03, 0.04, 14]} />
+                  {steel}
                 </mesh>
 
                 {[-1, 1].map((bladeDir) => (
                   <group
                     key={bladeDir}
-                    rotation={[0.09 * arm.dir * bladeDir, 0, 0]}
+                    rotation={[0.1 * arm.dir * bladeDir, 0, 0]}
                   >
-                    <mesh position={[bladeDir * 0.38, 0, 0]}>
-                      <boxGeometry args={[0.74, 0.01, 0.082]} />
+                    <mesh
+                      position={[bladeDir * 0.36, 0.008, 0]}
+                      scale={[0.34, 0.005, 0.044]}
+                    >
+                      <sphereGeometry args={[1, 16, 8]} />
                       <meshStandardMaterial
-                        color="#1E293B"
-                        metalness={0.7}
-                        roughness={0.25}
+                        color="#10141A"
+                        metalness={0.4}
+                        roughness={0.4}
                         transparent
-                        opacity={0.55}
+                        opacity={0.42}
+                        depthWrite={false}
                       />
-                    </mesh>
-                    <mesh position={[bladeDir * 0.69, 0.006, 0]}>
-                      <boxGeometry args={[0.12, 0.006, 0.084]} />
-                      <meshBasicMaterial color={themeColor} />
                     </mesh>
                   </group>
                 ))}
 
-                <mesh rotation={[Math.PI / 2, 0, 0]}>
-                  <circleGeometry args={[0.78, 32]} />
-                  <primitive object={rotorBlurMaterial} attach="material" />
-                </mesh>
-
-                <mesh rotation={[Math.PI / 2, 0, 0]}>
-                  <ringGeometry args={[0.76, 0.785, 32]} />
-                  <meshBasicMaterial
-                    color={themeColor}
-                    side={THREE.DoubleSide}
-                    transparent
-                    opacity={0.45}
-                  />
+                <mesh
+                  rotation={[-Math.PI / 2, 0, 0]}
+                  position={[0, 0.008, 0]}
+                  material={rotorDiscMaterial}
+                >
+                  <circleGeometry args={[ROTOR_RADIUS, lite ? 32 : 48]} />
                 </mesh>
               </group>
             </group>
           </group>
         ))}
 
-        {/* 4. Underslung 3-Axis LiDAR & Multispectral Gimbal Turret */}
-        <group ref={gimbalRef} position={[0, -0.14, -0.22]}>
+        {/* 4. Underslung stabilised payload: mapping camera over a LiDAR head */}
+        <group ref={gimbalRef} position={[0, -0.1, -0.24]}>
           <mesh>
-            <cylinderGeometry args={[0.08, 0.08, 0.05, 12]} />
-            <meshStandardMaterial color="#334155" metalness={0.88} roughness={0.24} />
+            <cylinderGeometry args={[0.055, 0.062, 0.035, 20]} />
+            {carbon}
           </mesh>
-          <mesh position={[0, -0.07, 0]}>
-            <boxGeometry args={[0.21, 0.1, 0.055]} />
-            <meshStandardMaterial color="#1E293B" metalness={0.85} roughness={0.28} />
+          {/* Yoke */}
+          <mesh position={[0, -0.03, 0]}>
+            <boxGeometry args={[0.25, 0.022, 0.05]} />
+            {carbon}
           </mesh>
-          <mesh position={[0, -0.14, 0]}>
-            <sphereGeometry args={[0.115, 16, 16]} />
+          {[-1, 1].map((side) => (
+            <mesh key={`yoke-${side}`} position={[side * 0.117, -0.09, 0]}>
+              <boxGeometry args={[0.018, 0.12, 0.05]} />
+              {carbon}
+            </mesh>
+          ))}
+          {/* Camera ball */}
+          <mesh position={[0, -0.12, 0]}>
+            <sphereGeometry args={[0.092, 24, 18]} />
             <meshStandardMaterial
-              color="#263040"
-              metalness={0.82}
-              roughness={0.22}
+              color="#C9D0D9"
+              metalness={0.2}
+              roughness={0.34}
             />
           </mesh>
-          <mesh position={[0.036, -0.14, -0.1]} rotation={[Math.PI / 2, 0, 0]}>
-            <cylinderGeometry args={[0.04, 0.04, 0.05, 12]} />
-            <meshStandardMaterial color="#FE6E00" metalness={0.9} roughness={0.2} />
+          <mesh position={[0, -0.125, -0.072]} rotation={[Math.PI / 2, 0, 0]}>
+            <cylinderGeometry args={[0.05, 0.054, 0.05, 24]} />
+            <meshStandardMaterial color="#090B0F" metalness={0.9} roughness={0.14} />
           </mesh>
-          <mesh position={[0.036, -0.14, -0.128]}>
-            <circleGeometry args={[0.032, 16]} />
-            <meshBasicMaterial color="#38BDF8" />
+          <mesh position={[0, -0.125, -0.098]} rotation={[0, Math.PI, 0]}>
+            <circleGeometry args={[0.036, 24]} />
+            <meshStandardMaterial
+              color="#0B1E33"
+              emissive="#38BDF8"
+              emissiveIntensity={0.55}
+              metalness={1}
+              roughness={0.05}
+            />
           </mesh>
-          <mesh position={[0, -0.25, 0]}>
-            <cylinderGeometry args={[0.032, 0.024, 0.03, 12]} />
-            <meshBasicMaterial color={themeColor} />
+          {/* LiDAR emitter head */}
+          <mesh position={[0, -0.235, 0]}>
+            <cylinderGeometry args={[0.04, 0.032, 0.05, 20]} />
+            {carbon}
+          </mesh>
+          <mesh position={[0, -0.262, 0]}>
+            <cylinderGeometry args={[0.026, 0.026, 0.008, 20]} />
+            {glow(4)}
           </mesh>
         </group>
 
-        {/* 5. Sweeping Volumetric LiDAR Laser Curtain */}
-        <group ref={laserCurtainRef} position={[0, -0.38, -0.22]}>
-          <mesh geometry={curtainGeometry}>
-            <meshBasicMaterial
-              color={themeColor}
-              transparent
-              opacity={0.18}
-              side={THREE.DoubleSide}
-              blending={THREE.AdditiveBlending}
-              depthWrite={false}
-            />
-          </mesh>
-          <lineSegments geometry={curtainRaysGeometry}>
-            <lineBasicMaterial
-              color={themeColor}
-              transparent
-              opacity={0.48}
-              blending={THREE.AdditiveBlending}
-              depthWrite={false}
-            />
-          </lineSegments>
+        </group>
+
+        {/* 5. Sweeping LiDAR curtain, aimed every frame at the deck's scan line */}
+        <group ref={laserCurtainRef} position={EMITTER}>
+          <mesh geometry={curtainGeometry} material={curtainMaterial} />
         </group>
       </group>
 
       {/* =====================================================================
-          TIER 2: 3D ISOMETRIC DIGITAL-TWIN TERRAIN & PROJECT DIORAMA DECK
+          TIER 2: DIGITAL-TWIN TERRAIN & PROJECT DIORAMA DECK
       ===================================================================== */}
-      <group position={[0, -0.96, 0]}>
-        <mesh position={[0, -0.08, 0]}>
-          <boxGeometry args={[2.56, 0.14, 2.36]} />
+      <group position={[0, DECK_Y, 0]}>
+        {/* Machined plinth */}
+        <RoundedBox
+          args={[2.6, 0.15, 2.4]}
+          radius={0.03}
+          smoothness={3}
+          position={[0, -0.078, 0]}
+        >
           <meshStandardMaterial
-            color="#11161F"
-            metalness={0.75}
-            roughness={0.35}
+            color="#1A202A"
+            metalness={0.9}
+            roughness={0.34}
           />
-        </mesh>
-
-        <mesh position={[0, -0.005, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-          <planeGeometry args={[2.44, 2.24]} />
-          <meshStandardMaterial
-            color="#0B1018"
-            metalness={0.5}
-            roughness={0.6}
-          />
-        </mesh>
+        </RoundedBox>
 
         {/* Luminous Perimeter Frame & Corner Benchmarks */}
-        <mesh position={[0, 0.002, -1.14]}>
-          <boxGeometry args={[2.48, 0.014, 0.018]} />
-          <meshBasicMaterial color={themeColor} />
-        </mesh>
-        <mesh position={[0, 0.002, 1.14]}>
-          <boxGeometry args={[2.48, 0.014, 0.018]} />
-          <meshBasicMaterial color={themeColor} />
-        </mesh>
-        <mesh position={[-1.24, 0.002, 0]}>
-          <boxGeometry args={[0.018, 0.014, 2.28]} />
-          <meshBasicMaterial color="#38BDF8" transparent opacity={0.7} />
-        </mesh>
-        <mesh position={[1.24, 0.002, 0]}>
-          <boxGeometry args={[0.018, 0.014, 2.28]} />
-          <meshBasicMaterial color="#38BDF8" transparent opacity={0.7} />
-        </mesh>
+        {[-1, 1].map((side) => (
+          <React.Fragment key={`frame-${side}`}>
+            <mesh position={[0, 0.001, side * 1.14]}>
+              <boxGeometry args={[2.48, 0.008, 0.012]} />
+              {glow(2.2)}
+            </mesh>
+            <mesh position={[side * 1.24, 0.001, 0]}>
+              <boxGeometry args={[0.012, 0.008, 2.28]} />
+              <meshBasicMaterial color="#38BDF8" transparent opacity={0.7} />
+            </mesh>
+          </React.Fragment>
+        ))}
 
         {[
           [-1.24, -1.14],
@@ -731,83 +749,51 @@ export default function AutonomousDroneAsset({
           [-1.24, 1.14],
           [1.24, 1.14],
         ].map(([cx, cz], idx) => (
-          <group key={`fid-${idx}`} position={[cx, 0.02, cz]}>
+          <group key={`fid-${idx}`} position={[cx, 0.014, cz]}>
             <mesh>
-              <boxGeometry args={[0.09, 0.05, 0.09]} />
-              <meshStandardMaterial color="#273244" metalness={0.85} roughness={0.25} />
+              <cylinderGeometry args={[0.04, 0.048, 0.04, 6]} />
+              {steel}
             </mesh>
-            <mesh position={[0, 0.03, 0]}>
-              <boxGeometry args={[0.05, 0.012, 0.05]} />
-              <meshBasicMaterial color={themeColor} />
+            <mesh position={[0, 0.024, 0]}>
+              <cylinderGeometry args={[0.02, 0.02, 0.01, 6]} />
+              {glow(2.4)}
             </mesh>
           </group>
         ))}
 
-        {/* 3D Topographic Wireframe Mesh & Elevation Point Cloud */}
-        <lineSegments>
-          <bufferGeometry>
-            <bufferAttribute
-              attach="attributes-position"
-              args={[terrainData.linePositions, 3]}
-            />
-          </bufferGeometry>
-          <lineBasicMaterial
-            color="#38BDF8"
-            transparent
-            opacity={0.34}
-            blending={THREE.AdditiveBlending}
-            depthWrite={false}
-          />
-        </lineSegments>
-
-        <points>
-          <bufferGeometry>
-            <bufferAttribute
-              attach="attributes-position"
-              args={[terrainData.pointPositions, 3]}
-            />
-            <bufferAttribute
-              attach="attributes-color"
-              args={[terrainData.pointColors, 3]}
-            />
-          </bufferGeometry>
-          <pointsMaterial
-            size={0.032}
-            vertexColors
-            transparent
-            opacity={0.9}
-            blending={THREE.AdditiveBlending}
-            depthWrite={false}
-          />
-        </points>
+        {/* Surveyed terrain: contours, grid and LiDAR sweep live in the shader */}
+        <mesh geometry={terrainGeometry} material={terrainMaterial} />
 
         {/* SECTOR A (NW): CSPDCL Electrical Distribution Corridor */}
         <group>
-          {[
-            [-0.92, -0.68, 0.16],
-            [-0.5, -0.36, 0.24],
-            [-0.08, -0.1, 0.16],
-          ].map(([px, pz, baseH], idx) => (
-            <group key={`pylon-${idx}`} position={[px, baseH, pz]}>
-              <mesh position={[0, 0.09, 0]}>
-                <cylinderGeometry args={[0.012, 0.032, 0.22, 4]} />
+          {PYLONS.map(([px, pz], idx) => (
+            <group key={`pylon-${idx}`} position={[px, deckHeight(px, pz) - 0.01, pz]}>
+              <mesh position={[0, PYLON_HEIGHT / 2, 0]}>
+                <cylinderGeometry args={[0.008, 0.03, PYLON_HEIGHT, 4]} />
                 <meshStandardMaterial
-                  color={projectId === "cspdcl-gis" ? "#FE6E00" : "#94A3B8"}
+                  color={projectId === "cspdcl-gis" ? "#FE6E00" : "#AEB8C5"}
                   emissive={projectId === "cspdcl-gis" ? "#FE6E00" : "#000000"}
-                  emissiveIntensity={projectId === "cspdcl-gis" ? 1.5 : 0}
-                  metalness={0.8}
+                  emissiveIntensity={projectId === "cspdcl-gis" ? 1.2 : 0}
+                  metalness={0.9}
                   roughness={0.3}
+                  wireframe
                 />
               </mesh>
-              <mesh position={[0, 0.17, 0]}>
-                <boxGeometry args={[0.12, 0.01, 0.012]} />
-                <meshBasicMaterial
-                  color={projectId === "cspdcl-gis" ? "#FFB74D" : "#CBD5E1"}
-                />
-              </mesh>
-              <mesh position={[0, 0.21, 0]}>
-                <sphereGeometry args={[0.016, 8, 8]} />
-                <meshBasicMaterial color="#FE6E00" />
+              {[0.6, 0.8].map((at, armIdx) => (
+                <mesh
+                  key={at}
+                  position={[0, PYLON_HEIGHT * at, 0]}
+                  rotation={[0, Math.PI / 2, 0]}
+                >
+                  <boxGeometry args={[armIdx === 0 ? 0.13 : 0.11, 0.007, 0.007]} />
+                  <meshBasicMaterial
+                    color={projectId === "cspdcl-gis" ? "#FFB74D" : "#CBD5E1"}
+                  />
+                </mesh>
+              ))}
+              <mesh position={[0, PYLON_HEIGHT + 0.006, 0]}>
+                <sphereGeometry args={[0.011, 8, 8]} />
+                <meshBasicMaterial color="#FE6E00" toneMapped={false} />
               </mesh>
             </group>
           ))}
@@ -827,29 +813,33 @@ export default function AutonomousDroneAsset({
         </group>
 
         {/* SECTOR B (NE): Rooftop Solar CAD Array (France Solar Project) */}
-        <group position={[0.56, 0.12, -0.44]}>
-          <mesh position={[0, -0.04, 0]}>
-            <boxGeometry args={[0.72, 0.1, 0.56]} />
-            <meshStandardMaterial color="#1E293B" metalness={0.6} roughness={0.4} />
-          </mesh>
+        <group position={[0.56, deckHeight(0.56, -0.44) + 0.05, -0.44]}>
+          <RoundedBox
+            args={[0.72, 0.1, 0.56]}
+            radius={0.012}
+            smoothness={2}
+            position={[0, -0.04, 0]}
+          >
+            <meshStandardMaterial color="#2A3340" metalness={0.3} roughness={0.6} />
+          </RoundedBox>
           {[-0.22, 0, 0.22].map((rx, rIdx) =>
             [-0.16, -0.05, 0.06, 0.17].map((cz, cIdx) => (
               <mesh
                 key={`solar-${rIdx}-${cIdx}`}
-                position={[rx, 0.03, cz]}
-                rotation={[-0.28, 0, 0]}
+                position={[rx, 0.032, cz]}
+                rotation={[0.3, 0, 0]}
               >
-                <boxGeometry args={[0.17, 0.008, 0.085]} />
+                <boxGeometry args={[0.18, 0.006, 0.085]} />
                 <meshStandardMaterial
-                  color="#1E3A8A"
+                  color="#12265C"
                   emissive={
-                    projectId === "solar-mapping" ? "#FFB74D" : "#38BDF8"
+                    projectId === "solar-mapping" ? "#FFB74D" : "#1D4ED8"
                   }
                   emissiveIntensity={
-                    projectId === "solar-mapping" ? 1.4 : 0.35
+                    projectId === "solar-mapping" ? 0.9 : 0.25
                   }
-                  metalness={0.85}
-                  roughness={0.2}
+                  metalness={1}
+                  roughness={0.16}
                 />
               </mesh>
             ))
@@ -857,135 +847,105 @@ export default function AutonomousDroneAsset({
         </group>
 
         {/* SECTOR C (SW): KishanGuru Digital Agriculture NDVI Terraces */}
-        <group position={[-0.54, 0.05, 0.48]}>
-          {[-0.22, -0.07, 0.08, 0.23].map((zRow, rIdx) => (
-            <mesh key={`crop-${rIdx}`} position={[0, 0.015, zRow]}>
-              <boxGeometry args={[0.74, 0.024, 0.095]} />
-              <meshStandardMaterial
-                color="#065F46"
-                emissive="#10B981"
-                emissiveIntensity={
-                  projectId === "kishan-guru" ? 1.4 - rIdx * 0.2 : 0.35
-                }
-                roughness={0.4}
-              />
-            </mesh>
-          ))}
-        </group>
+        {cropParcels.map((parcel, rIdx) => (
+          <mesh key={`crop-${rIdx}`} geometry={parcel}>
+            <meshStandardMaterial
+              color="#0B6B4F"
+              emissive="#10B981"
+              emissiveIntensity={
+                projectId === "kishan-guru" ? 1.3 - rIdx * 0.22 : 0.16
+              }
+              roughness={0.6}
+              side={THREE.DoubleSide}
+            />
+          </mesh>
+        ))}
 
         {/* SECTOR D (SE): Track-Fields GPS Boundary Demarcation */}
-        <group position={[0.52, 0.06, 0.48]}>
-          {[
-            [-0.28, -0.22],
-            [0.28, -0.22],
-            [0.28, 0.22],
-            [-0.28, 0.22],
-          ].map(([bx, bz], bIdx) => (
-            <group key={`gps-${bIdx}`} position={[bx, 0.04, bz]}>
-              <mesh>
-                <cylinderGeometry args={[0.01, 0.01, 0.12, 6]} />
-                <meshBasicMaterial color="#38BDF8" />
-              </mesh>
-              <mesh position={[0, 0.07, 0]}>
-                <octahedronGeometry args={[0.024, 0]} />
-                <meshBasicMaterial
-                  color={projectId === "track-fields" ? "#FFFFFF" : "#38BDF8"}
-                />
-              </mesh>
-            </group>
-          ))}
-          <lineSegments>
-            <bufferGeometry>
-              <bufferAttribute
-                attach="attributes-position"
-                args={[gpsBoundaryLines, 3]}
+        {GPS_CORNERS.map(([bx, bz], bIdx) => (
+          <group key={`gps-${bIdx}`} position={[bx, deckHeight(bx, bz), bz]}>
+            <mesh position={[0, 0.05, 0]}>
+              <cylinderGeometry args={[0.005, 0.005, 0.1, 6]} />
+              {steel}
+            </mesh>
+            <mesh position={[0, 0.115, 0]}>
+              <octahedronGeometry args={[0.02, 0]} />
+              <meshBasicMaterial
+                color={projectId === "track-fields" ? "#FFFFFF" : "#38BDF8"}
+                toneMapped={false}
               />
-            </bufferGeometry>
-            <lineBasicMaterial
-              color="#38BDF8"
-              transparent
-              opacity={projectId === "track-fields" ? 0.95 : 0.45}
+            </mesh>
+          </group>
+        ))}
+        <lineSegments>
+          <bufferGeometry>
+            <bufferAttribute
+              attach="attributes-position"
+              args={[gpsBoundary, 3]}
             />
-          </lineSegments>
-        </group>
-
-        {/* Active LiDAR Laser Scan-Line Bar Sweeping Across the Terrain */}
-        <mesh
-          ref={scanLineBarRef}
-          position={[0, 0.14, 0]}
-          rotation={[-Math.PI / 2, 0, 0]}
-        >
-          <planeGeometry args={[2.32, 0.055]} />
-          <meshBasicMaterial
-            color={themeColor}
+          </bufferGeometry>
+          <lineBasicMaterial
+            color="#38BDF8"
             transparent
-            opacity={0.85}
-            side={THREE.DoubleSide}
-            blending={THREE.AdditiveBlending}
-            depthWrite={false}
+            opacity={projectId === "track-fields" ? 1 : 0.5}
           />
-        </mesh>
+        </lineSegments>
 
         {/* Active Project Target Lock Reticle + Floating Waypoint Beacon */}
-        <group ref={targetReticleRef} position={[-0.52, 0.18, -0.42]}>
+        <group ref={targetReticleRef} position={[-0.52, 0.2, -0.42]}>
           <mesh rotation={[-Math.PI / 2, 0, 0]}>
-            <ringGeometry args={[0.22, 0.255, 6]} />
+            <ringGeometry args={[0.235, 0.25, 6]} />
             <meshBasicMaterial
               color={themeColor}
               side={THREE.DoubleSide}
               transparent
-              opacity={0.92}
+              opacity={0.95}
+              toneMapped={false}
             />
           </mesh>
           <mesh rotation={[-Math.PI / 2, 0, 0]}>
-            <ringGeometry args={[0.06, 0.085, 16]} />
-            <meshBasicMaterial color="#FFFFFF" side={THREE.DoubleSide} />
+            <ringGeometry args={[0.3, 0.306, 48, 1, 0, Math.PI * 1.25]} />
+            <meshBasicMaterial
+              color={themeColor}
+              side={THREE.DoubleSide}
+              transparent
+              opacity={0.55}
+            />
           </mesh>
-          <mesh position={[0, 0.14, 0]}>
-            <cylinderGeometry args={[0.004, 0.014, 0.26, 6]} />
+          <mesh position={[0, 0.15, 0]}>
+            <cylinderGeometry args={[0.002, 0.008, 0.28, 6]} />
             <meshBasicMaterial
               color={themeColor}
               transparent
-              opacity={0.48}
+              opacity={0.6}
               blending={THREE.AdditiveBlending}
               depthWrite={false}
             />
           </mesh>
-          <mesh ref={waypointDiamondRef} position={[0, 0.28, 0]}>
-            <octahedronGeometry args={[0.046, 0]} />
-            <meshBasicMaterial color="#FFFFFF" />
+          <mesh ref={waypointDiamondRef} position={[0, 0.3, 0]}>
+            <octahedronGeometry args={[0.038, 0]} />
+            <meshBasicMaterial color="#FFFFFF" toneMapped={false} />
           </mesh>
         </group>
       </group>
 
       {/* =====================================================================
-          TIER 3: ORBITAL TELEMETRY COMPASS RING SURROUNDING THE DIORAMA
+          TIER 3: TELEMETRY COMPASS RING SURROUNDING THE DIORAMA
       ===================================================================== */}
-      <group ref={orbitalRingRef} position={[0, -0.15, 0]}>
+      <group ref={compassRingRef} position={[0, -0.15, 0]}>
         <mesh rotation={[Math.PI / 2, 0, 0]}>
-          <torusGeometry args={[1.95, 0.006, 6, 64]} />
-          <meshBasicMaterial color={themeColor} transparent opacity={0.38} />
+          <torusGeometry args={[1.95, 0.0045, 6, lite ? 72 : 120]} />
+          <meshBasicMaterial color={themeColor} transparent opacity={0.4} />
         </mesh>
-        {Array.from({ length: 24 }, (_, i) => {
-          const a = (i / 24) * Math.PI * 2;
-          const isCard = i % 6 === 0;
-          return (
-            <mesh
-              key={`orb-tick-${i}`}
-              position={[Math.cos(a) * 1.95, 0, Math.sin(a) * 1.95]}
-              rotation={[0, -a, 0]}
-            >
-              <boxGeometry
-                args={[isCard ? 0.12 : 0.055, 0.01, isCard ? 0.016 : 0.008]}
-              />
-              <meshBasicMaterial
-                color={isCard ? themeColor : "#64748B"}
-                transparent
-                opacity={isCard ? 0.9 : 0.5}
-              />
-            </mesh>
-          );
-        })}
+        <lineSegments>
+          <bufferGeometry>
+            <bufferAttribute
+              attach="attributes-position"
+              args={[compassTicks, 3]}
+            />
+          </bufferGeometry>
+          <lineBasicMaterial color="#7C8AA0" transparent opacity={0.55} />
+        </lineSegments>
       </group>
     </group>
   );

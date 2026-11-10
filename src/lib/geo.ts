@@ -1,9 +1,22 @@
 import * as THREE from "three";
+import {
+  COAST_LINE_SIZES,
+  COAST_POINTS,
+  COAST_QUANT,
+  INDIA_SEA_COAST,
+  LAND_MASK_HEIGHT,
+  LAND_MASK_RLE,
+  LAND_MASK_WIDTH,
+  SRI_LANKA_COAST,
+} from "./landData";
 
 /**
  * Geospatial geometry builders for the Planetary GIS Command Globe.
- * Uses true polygon rings for continents and India, plus clean vertex-pair
- * line segments so graticules and coastlines never draw stray connecting chords.
+ *
+ * The world's land comes from Natural Earth (see landData.ts): a land/sea
+ * raster drives the dot matrix and the ocean shader, and real coastline
+ * polylines replace hand-drawn continent shapes. Everything is emitted as
+ * vertex pairs for <lineSegments> so no stray chords connect separate lines.
  */
 
 export function latLonToVector3(
@@ -20,28 +33,11 @@ export function latLonToVector3(
   );
 }
 
-/** High-precision polygon of India (Kutch -> Peninsular coast -> NE -> Himalayas -> Rajasthan). */
-export const INDIA_OUTLINE: [number, number][] = [
-  [23.8, 68.4],
-  [22.9, 69.1],
-  [22.4, 69.0],
-  [20.9, 70.4],
-  [21.6, 72.2],
-  [20.3, 72.8],
-  [18.9, 72.8],
-  [16.9, 73.3],
-  [14.8, 74.1],
-  [12.9, 74.8],
-  [10.0, 76.2],
-  [8.08, 77.55],
-  [9.2, 79.1],
-  [10.3, 79.8],
-  [13.1, 80.3],
-  [15.9, 80.8],
-  [17.7, 83.3],
-  [19.8, 85.8],
-  [21.6, 87.5],
-  [21.9, 89.1],
+/**
+ * India's land frontier, Sundarbans -> North-East -> Himalayas -> Rajasthan,
+ * continuing from where the sea coast ends and closing back at Sir Creek.
+ */
+const INDIA_LAND_FRONTIER: [number, number][] = [
   [24.0, 88.8],
   [26.2, 89.8],
   [26.0, 91.8],
@@ -64,280 +60,15 @@ export const INDIA_OUTLINE: [number, number][] = [
   [24.3, 68.8],
 ];
 
-const SRI_LANKA_RING: [number, number][] = [
-  [9.7, 80.0],
-  [8.5, 81.2],
-  [6.8, 81.8],
-  [5.9, 80.5],
-  [6.9, 79.8],
-  [8.4, 79.8],
+/** Closed outline of India: surveyed sea coast plus the land frontier. */
+export const INDIA_OUTLINE: [number, number][] = [
+  ...INDIA_SEA_COAST,
+  ...INDIA_LAND_FRONTIER,
 ];
 
-/** Continental polygon rings for accurate world silhouettes. */
-const WORLD_CONTINENT_RINGS: [number, number][][] = [
-  // Africa
-  [
-    [35.8, -5.8],
-    [37.0, 10.2],
-    [32.5, 15.2],
-    [31.5, 25.2],
-    [31.2, 32.3],
-    [27.8, 34.0],
-    [20.0, 37.3],
-    [12.5, 43.4],
-    [11.8, 51.3],
-    [4.5, 48.0],
-    [-1.5, 41.5],
-    [-10.5, 40.5],
-    [-18.0, 36.8],
-    [-26.0, 32.8],
-    [-34.2, 25.5],
-    [-34.8, 19.8],
-    [-28.6, 16.5],
-    [-17.2, 11.8],
-    [-6.0, 12.2],
-    [4.0, 9.4],
-    [4.5, 2.0],
-    [4.6, -7.6],
-    [10.5, -14.6],
-    [14.7, -17.5],
-    [21.0, -17.0],
-    [28.0, -13.0],
-    [33.5, -7.8],
-  ],
-  // Madagascar
-  [
-    [-12.2, 49.3],
-    [-16.0, 49.8],
-    [-25.0, 47.0],
-    [-25.4, 44.8],
-    [-19.8, 44.2],
-    [-15.0, 46.3],
-  ],
-  // Eurasia (Europe + Middle East + Asia)
-  [
-    [36.2, -9.0],
-    [43.3, -8.8],
-    [43.4, -1.8],
-    [48.4, -4.6],
-    [51.0, 1.8],
-    [53.8, 8.8],
-    [57.5, 10.2],
-    [55.0, 14.0],
-    [54.6, 19.6],
-    [60.0, 29.8],
-    [66.0, 24.5],
-    [70.8, 28.0],
-    [68.8, 41.0],
-    [69.5, 60.0],
-    [72.5, 80.0],
-    [73.5, 105.0],
-    [70.8, 135.0],
-    [66.0, 170.0],
-    [60.0, 162.0],
-    [53.0, 141.0],
-    [43.0, 132.0],
-    [38.5, 128.5],
-    [34.6, 126.5],
-    [39.8, 124.2],
-    [38.8, 118.0],
-    [35.0, 120.5],
-    [31.0, 121.8],
-    [25.0, 119.5],
-    [22.2, 114.2],
-    [20.2, 106.8],
-    [13.5, 109.2],
-    [8.6, 104.8],
-    [13.2, 100.8],
-    [7.2, 100.4],
-    [1.4, 103.9],
-    [5.4, 100.2],
-    [15.8, 97.6],
-    [21.8, 91.8],
-    [22.0, 88.5],
-    [20.0, 86.2],
-    [15.5, 80.3],
-    [8.2, 77.5],
-    [18.8, 72.8],
-    [23.5, 68.4],
-    [25.2, 62.0],
-    [26.8, 56.4],
-    [29.8, 48.6],
-    [24.2, 54.5],
-    [22.5, 59.8],
-    [17.0, 54.2],
-    [12.8, 45.0],
-    [18.0, 41.2],
-    [28.0, 34.8],
-    [31.5, 34.4],
-    [36.5, 36.0],
-    [36.8, 28.0],
-    [40.8, 26.5],
-    [38.0, 23.8],
-    [40.5, 19.4],
-    [44.5, 12.4],
-    [40.2, 18.2],
-    [38.2, 15.6],
-    [43.8, 10.2],
-    [43.2, 5.4],
-    [40.6, 0.5],
-    [36.1, -5.4],
-  ],
-  // Scandinavia
-  [
-    [55.6, 12.8],
-    [58.8, 11.0],
-    [60.4, 5.2],
-    [63.5, 9.5],
-    [68.5, 15.5],
-    [71.0, 25.8],
-    [65.8, 24.0],
-    [60.2, 18.8],
-  ],
-  // Great Britain
-  [
-    [50.1, -5.2],
-    [51.4, 1.4],
-    [53.6, 0.1],
-    [56.0, -2.8],
-    [58.6, -3.2],
-    [57.2, -5.8],
-    [54.8, -4.8],
-    [51.6, -5.0],
-  ],
-  // Japan (Honshu / Kyushu)
-  [
-    [31.2, 130.6],
-    [33.8, 134.5],
-    [35.6, 140.8],
-    [39.6, 142.0],
-    [41.4, 140.8],
-    [37.5, 137.2],
-    [34.2, 131.0],
-  ],
-  // Sumatra
-  [
-    [5.6, 95.3],
-    [1.5, 102.2],
-    [-3.2, 105.8],
-    [-5.9, 104.6],
-    [-1.2, 100.2],
-    [3.2, 96.5],
-  ],
-  // Java
-  [
-    [-6.0, 105.5],
-    [-6.8, 111.0],
-    [-8.4, 114.5],
-    [-8.2, 110.2],
-    [-6.9, 106.2],
-  ],
-  // Borneo
-  [
-    [6.8, 116.8],
-    [4.2, 117.8],
-    [-1.2, 116.9],
-    [-3.5, 114.5],
-    [-2.8, 110.2],
-    [1.8, 109.4],
-    [4.8, 114.2],
-  ],
-  // Philippines
-  [
-    [18.4, 120.6],
-    [16.0, 122.0],
-    [12.6, 124.2],
-    [7.2, 126.4],
-    [6.2, 124.2],
-    [10.5, 122.0],
-    [14.5, 120.4],
-  ],
-  // New Guinea
-  [
-    [-0.8, 131.2],
-    [-2.5, 140.8],
-    [-6.5, 147.8],
-    [-10.2, 150.6],
-    [-8.5, 143.5],
-    [-8.2, 138.2],
-    [-4.2, 134.0],
-  ],
-  // Australia
-  [
-    [-12.2, 131.0],
-    [-12.0, 136.8],
-    [-16.8, 139.2],
-    [-11.0, 142.5],
-    [-19.2, 146.8],
-    [-27.5, 153.4],
-    [-34.0, 151.2],
-    [-38.4, 146.5],
-    [-38.2, 141.0],
-    [-35.0, 136.0],
-    [-32.2, 132.5],
-    [-32.0, 124.0],
-    [-35.0, 117.8],
-    [-34.0, 115.0],
-    [-26.0, 113.5],
-    [-21.8, 114.2],
-    [-19.8, 120.5],
-    [-15.0, 124.8],
-    [-14.5, 129.5],
-  ],
-  // New Zealand
-  [
-    [-34.5, 172.8],
-    [-37.8, 178.4],
-    [-41.5, 175.2],
-    [-46.2, 169.5],
-    [-45.0, 167.0],
-    [-40.8, 172.5],
-  ],
-  // North America
-  [
-    [70.0, -162.0],
-    [60.0, -165.0],
-    [58.0, -136.0],
-    [48.5, -124.6],
-    [34.0, -118.5],
-    [23.0, -106.5],
-    [16.0, -95.0],
-    [8.5, -79.5],
-    [18.2, -88.0],
-    [21.2, -86.8],
-    [19.5, -96.0],
-    [26.0, -97.2],
-    [29.8, -90.0],
-    [25.2, -80.2],
-    [35.2, -75.5],
-    [41.5, -70.5],
-    [45.0, -66.5],
-    [47.5, -52.8],
-    [58.0, -62.0],
-    [68.0, -75.0],
-    [71.0, -120.0],
-  ],
-  // South America
-  [
-    [11.2, -74.5],
-    [10.5, -62.0],
-    [5.0, -52.0],
-    [-1.5, -48.0],
-    [-5.8, -35.2],
-    [-13.0, -38.5],
-    [-23.0, -43.2],
-    [-34.5, -54.0],
-    [-42.0, -63.5],
-    [-54.8, -66.5],
-    [-53.0, -73.5],
-    [-41.5, -73.8],
-    [-23.5, -70.5],
-    [-18.2, -70.8],
-    [-12.0, -77.1],
-    [-4.8, -81.2],
-    [2.0, -78.8],
-    [8.0, -77.5],
-  ],
+export const INDIA_RINGS: [number, number][][] = [
+  INDIA_OUTLINE,
+  SRI_LANKA_COAST,
 ];
 
 /** Ray-casting point-in-polygon check. */
@@ -360,91 +91,131 @@ function pointInRing(
 }
 
 export const isIndiaLand = (lat: number, lon: number): boolean =>
-  pointInRing(lat, lon, INDIA_OUTLINE) || pointInRing(lat, lon, SRI_LANKA_RING);
+  lat > 5 &&
+  lat < 36 &&
+  lon > 68 &&
+  lon < 98 &&
+  (pointInRing(lat, lon, INDIA_OUTLINE) ||
+    pointInRing(lat, lon, SRI_LANKA_COAST));
 
-export const INDIA_RINGS: [number, number][][] = [
-  INDIA_OUTLINE,
-  SRI_LANKA_RING,
-];
+function decodeBase64(encoded: string): Uint8Array {
+  const binary = atob(encoded);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
 
-export const INDIA_BOUNDS = {
-  latMin: 6,
-  latMax: 36,
-  lonMin: 68,
-  lonMax: 98,
-} as const;
+let landMaskCache: Uint8Array | null = null;
+
+/**
+ * Land raster, one byte per cell (255 = land). Row 0 is the south pole and
+ * column 0 is 180 W, which is exactly how a sphere's UVs sample a texture.
+ */
+export function getLandMask(): {
+  data: Uint8Array;
+  width: number;
+  height: number;
+} {
+  if (!landMaskCache) {
+    const runs = decodeBase64(LAND_MASK_RLE);
+    const mask = new Uint8Array(LAND_MASK_WIDTH * LAND_MASK_HEIGHT);
+    let cell = 0;
+    let isLand = false;
+    for (let i = 0; i < runs.length; ) {
+      let length = 0;
+      let shift = 0;
+      let byte: number;
+      do {
+        byte = runs[i++];
+        length |= (byte & 0x7f) << shift;
+        shift += 7;
+      } while (byte & 0x80);
+      if (isLand) mask.fill(255, cell, cell + length);
+      cell += length;
+      isLand = !isLand;
+    }
+    landMaskCache = mask;
+  }
+  return {
+    data: landMaskCache,
+    width: LAND_MASK_WIDTH,
+    height: LAND_MASK_HEIGHT,
+  };
+}
 
 export function isLandmass(lat: number, lon: number): boolean {
   if (isIndiaLand(lat, lon)) return true;
-  for (let i = 0; i < WORLD_CONTINENT_RINGS.length; i++) {
-    if (pointInRing(lat, lon, WORLD_CONTINENT_RINGS[i])) return true;
-  }
-  return false;
+  const { data, width, height } = getLandMask();
+  const wrapped = ((((lon + 180) % 360) + 360) % 360) / 360;
+  const col = Math.min(width - 1, Math.floor(wrapped * width));
+  const row = Math.min(
+    height - 1,
+    Math.max(0, Math.floor(((lat + 90) / 180) * height))
+  );
+  return data[row * width + col] > 0;
 }
 
-export const isIndiaRegion = isIndiaLand;
-
-/** Convert a closed ring of [lat, lon] into vertex pairs for <lineSegments>. */
-function ringToLineSegments(
-  ring: [number, number][],
+/** Append one [lat, lon] edge, subdivided so it hugs the sphere. */
+function pushEdge(
+  out: number[],
+  lat0: number,
+  lon0: number,
+  lat1: number,
+  lon1: number,
   radius: number,
-  maxSegmentDegrees = 3.5
-): number[] {
-  const out: number[] = [];
-  for (let i = 0; i < ring.length; i++) {
-    const [lat0, lon0] = ring[i];
-    const [lat1, lon1] = ring[(i + 1) % ring.length];
-    const dist = Math.hypot(lat1 - lat0, lon1 - lon0);
-    const steps = Math.max(1, Math.ceil(dist / maxSegmentDegrees));
-    for (let s = 0; s < steps; s++) {
-      const t0 = s / steps;
-      const t1 = (s + 1) / steps;
-      const v0 = latLonToVector3(
-        lat0 + (lat1 - lat0) * t0,
-        lon0 + (lon1 - lon0) * t0,
-        radius
-      );
-      const v1 = latLonToVector3(
-        lat0 + (lat1 - lat0) * t1,
-        lon0 + (lon1 - lon0) * t1,
-        radius
-      );
-      out.push(v0.x, v0.y, v0.z, v1.x, v1.y, v1.z);
-    }
+  maxSegmentDegrees: number
+): void {
+  const dist = Math.hypot(lat1 - lat0, lon1 - lon0);
+  const steps = Math.max(1, Math.ceil(dist / maxSegmentDegrees));
+  let prev = latLonToVector3(lat0, lon0, radius);
+  for (let s = 1; s <= steps; s++) {
+    const t = s / steps;
+    const next = latLonToVector3(
+      lat0 + (lat1 - lat0) * t,
+      lon0 + (lon1 - lon0) * t,
+      radius
+    );
+    out.push(prev.x, prev.y, prev.z, next.x, next.y, next.z);
+    prev = next;
   }
-  return out;
 }
 
 /** Closed coastline line segments for India & Sri Lanka. */
 export function buildIndiaCoastlineSegments(radius: number): Float32Array {
   const out: number[] = [];
   for (const ring of INDIA_RINGS) {
-    out.push(...ringToLineSegments(ring, radius, 1.5));
-  }
-  return new Float32Array(out);
-}
-
-/** Closed coastline line segments for all world continents. */
-export function buildWorldCoastlineSegments(radius: number): Float32Array {
-  const out: number[] = [];
-  for (const ring of WORLD_CONTINENT_RINGS) {
-    out.push(...ringToLineSegments(ring, radius, 3.0));
-  }
-  return new Float32Array(out);
-}
-
-/** Backwards-compatible helper for ring position arrays. */
-export function indiaCoastlinePositions(
-  radius: number,
-  rings: [number, number][][] = INDIA_RINGS
-): Float32Array {
-  const out: number[] = [];
-  for (const ring of rings) {
-    for (let i = 0; i <= ring.length; i++) {
-      const pt = ring[i % ring.length];
-      const v = latLonToVector3(pt[0], pt[1], radius);
-      out.push(v.x, v.y, v.z);
+    for (let i = 0; i < ring.length; i++) {
+      const [lat0, lon0] = ring[i];
+      const [lat1, lon1] = ring[(i + 1) % ring.length];
+      pushEdge(out, lat0, lon0, lat1, lon1, radius, 1.5);
     }
+  }
+  return new Float32Array(out);
+}
+
+/**
+ * Coastline segments for every landmass except India's own shore, which the
+ * highlighted India outline draws instead.
+ */
+export function buildWorldCoastlineSegments(radius: number): Float32Array {
+  const bytes = decodeBase64(COAST_POINTS);
+  const view = new DataView(bytes.buffer);
+  const out: number[] = [];
+  let cursor = 0;
+  for (const size of COAST_LINE_SIZES) {
+    for (let i = 0; i < size - 1; i++) {
+      const at = (cursor + i) * 4;
+      pushEdge(
+        out,
+        view.getInt16(at + 2, true) / COAST_QUANT,
+        view.getInt16(at, true) / COAST_QUANT,
+        view.getInt16(at + 6, true) / COAST_QUANT,
+        view.getInt16(at + 4, true) / COAST_QUANT,
+        radius,
+        3
+      );
+    }
+    cursor += size;
   }
   return new Float32Array(out);
 }
@@ -509,179 +280,138 @@ export function buildGraticule(radius: number): {
   };
 }
 
-export const EARTH_CIRCUMFERENCE_KM = 40075;
-export const KM_PER_UNIT = EARTH_CIRCUMFERENCE_KM / (2 * Math.PI);
-
+/** Distance in degrees from a point to the nearest edge of India's outline. */
 export function indiaCoastProximity(lat: number, lon: number): number {
-  let best = 99;
+  let best = Infinity;
   for (let i = 0; i < INDIA_OUTLINE.length; i++) {
-    const [a, b] = INDIA_OUTLINE[i];
-    const d = (lat - a) * (lat - a) + (lon - b) * (lon - b);
+    const [aLat, aLon] = INDIA_OUTLINE[i];
+    const [bLat, bLon] = INDIA_OUTLINE[(i + 1) % INDIA_OUTLINE.length];
+    const dLat = bLat - aLat;
+    const dLon = bLon - aLon;
+    const len2 = dLat * dLat + dLon * dLon || 1e-9;
+    const t = Math.max(
+      0,
+      Math.min(1, ((lat - aLat) * dLat + (lon - aLon) * dLon) / len2)
+    );
+    const d = Math.hypot(lat - (aLat + t * dLat), lon - (aLon + t * dLon));
     if (d < best) best = d;
   }
-  return Math.sqrt(best);
+  return best;
 }
 
+/** Coarse relief model: enough to lift the ranges the globe actually shows. */
 export function elevationKm(lat: number, lon: number): number {
-  if (!isLandmass(lat, lon)) return -3.6;
-
   let km = 0.25;
-  const band = (
+  const range = (
     latMin: number,
     latMax: number,
     lonMin: number,
     lonMax: number,
-    peakKm: number,
-    falloffLat = 0
+    peakKm: number
   ) => {
-    if (lat < latMin || lat > latMax || lon < lonMin || lon > lonMax) return 0;
-    if (falloffLat === 0) return peakKm;
-    const centre = (latMin + latMax) / 2;
-    const ridge = Math.max(0, 1 - Math.abs(lat - centre) / falloffLat);
-    return peakKm * ridge;
+    if (lat < latMin || lat > latMax || lon < lonMin || lon > lonMax) return;
+    // Ridge profile: peaks along the centre line, easing out to the foothills
+    const acrossLat = 1 - Math.abs(lat - (latMin + latMax) / 2) / ((latMax - latMin) / 2);
+    const acrossLon = 1 - Math.abs(lon - (lonMin + lonMax) / 2) / ((lonMax - lonMin) / 2);
+    const ridge = Math.min(1, acrossLat * 1.6) * Math.min(1, acrossLon * 3);
+    km = Math.max(km, 0.25 + (peakKm - 0.25) * ridge);
   };
 
-  km = Math.max(km, band(27, 36, 72, 98, 5.8, 4.8)); // Himalayas & Tibetan plateau
-  km = Math.max(km, band(11, 23, 73.5, 84, 1.2)); // Deccan + Western Ghats
-  km = Math.max(km, band(23, 28.5, 72, 78, 0.9)); // Aravalli + Vindhya
-  km = Math.max(km, band(42, 48.5, 5, 17, 3.2)); // Alps
-  km = Math.max(km, band(14, 34, 36, 60, 1.5)); // Zagros / Arabian highlands
-  km = Math.max(km, band(-12, 9, 29, 41, 2.0)); // East African Rift
+  range(27, 37, 72, 104, 5.6); // Himalayas & Tibetan plateau
+  range(9, 21, 73, 78, 1.3); // Western Ghats
+  range(13, 24, 76, 84, 0.9); // Deccan plateau
+  range(23, 28.5, 72, 78, 0.9); // Aravalli + Vindhya
+  range(43.5, 48.5, 5, 16, 3.2); // Alps
+  range(27, 39, 44, 62, 2.4); // Zagros & Iranian plateau
+  range(35, 43, 67, 82, 3.6); // Hindu Kush, Pamir & Tien Shan
+  range(-4, 14, 33, 41, 2.2); // Ethiopian highlands & East African Rift
+  range(-48, 8, -79, -66, 3.8); // Andes
+  range(33, 56, -124, -105, 2.4); // Rockies
 
   return km;
 }
 
-export function sceneSunVector(_now?: Date): THREE.Vector3 {
-  // Fixed key-light direction that illuminates India, Europe, Africa and SE Asia
-  // cleanly with a dramatic orbital terminator on the far western/Pacific limb.
+export function sceneSunVector(): THREE.Vector3 {
+  // Fixed key-light direction in view space: high and front-right, so the
+  // hemisphere facing the camera reads as day with a soft terminator behind.
   return new THREE.Vector3(0.45, 0.38, 0.81).normalize();
 }
 
-export function hillshade(
-  lat: number,
-  lon: number,
-  sun: THREE.Vector3,
-  zExaggeration = 1.4
-): number {
-  const eps = 0.7;
-  const h = elevationKm(lat, lon);
-  const hEast = elevationKm(lat, lon + eps);
-  const hNorth = elevationKm(lat + eps, lon);
-
-  const clampSlope = (v: number) => Math.max(-0.75, Math.min(0.75, v));
-  const eastSlope = clampSlope(((hEast - h) / eps) * zExaggeration);
-  const northSlope = clampSlope(((hNorth - h) / eps) * zExaggeration);
-
-  const up = latLonToVector3(lat, lon, 1);
-  const east = latLonToVector3(lat, lon + 1, 1).sub(up).normalize();
-  const north = latLonToVector3(lat + 1, lon, 1).sub(up).normalize();
-
-  const normal = up
-    .clone()
-    .addScaledVector(east, eastSlope)
-    .addScaledVector(north, northSlope)
-    .normalize();
-
-  const lambert = Math.max(0, normal.dot(sun));
-  return 0.68 + 0.32 * Math.pow(lambert, 0.75);
+export interface TerrainDotMatrix {
+  positions: Float32Array;
+  colors: Float32Array;
+  sizes: Float32Array;
 }
 
 /**
- * Builds a high-contrast continental & India GIS dot matrix.
- * India is sampled at double density so the primary region of interest reads
- * with unmistakable topographic clarity.
+ * Builds the continental dot matrix: a hex-staggered halftone of every
+ * landmass, with India resampled at more than double density and lifted onto
+ * exaggerated relief so the region of interest reads first.
  */
 export function buildTerrainDotMatrix(
   step: number,
-  oceanKeep: number,
-  relief: number,
-  sun: THREE.Vector3
-): { positions: Float32Array; colors: Float32Array } {
+  relief: number
+): TerrainDotMatrix {
   const coords: number[] = [];
   const colors: number[] = [];
+  const sizes: number[] = [];
 
   const signalOrange = new THREE.Color("#FE6E00");
   const warmAmber = new THREE.Color("#FFB74D");
   const hotIvory = new THREE.Color("#FFF3E0");
-  const continentCyan = new THREE.Color("#7DD3FC");
-  const continentSlate = new THREE.Color("#CBD5E1");
-  const oceanBathymetry = new THREE.Color("#1E3A5F");
-  const shadeTmp = new THREE.Color();
+  const lowland = new THREE.Color("#58779B");
+  const upland = new THREE.Color("#B4C6DA");
+  const tint = new THREE.Color();
 
-  // 1. Global sampling pass (continents + structured bathymetric grid)
-  for (let lat = -76; lat <= 76; lat += step) {
-    const radiusAtLat = Math.max(0.15, Math.cos((lat * Math.PI) / 180));
-    const lonStep = step / radiusAtLat;
+  // 1. Global pass. Alternate rows are offset by half a step so the dots pack
+  //    as a halftone instead of lining up into visible meridian columns.
+  let row = 0;
+  for (let lat = -78; lat <= 82; lat += step, row++) {
+    const lonStep = step / Math.max(0.12, Math.cos((lat * Math.PI) / 180));
+    const offset = row % 2 === 0 ? 0 : lonStep * 0.5;
 
-    for (let lon = -180; lon < 180; lon += lonStep) {
-      if (isIndiaLand(lat, lon)) continue; // Handled in high-density pass below
+    for (let lon = -180 + offset; lon < 180; lon += lonStep) {
+      if (!isLandmass(lat, lon) || isIndiaLand(lat, lon)) continue;
 
-      const land = isLandmass(lat, lon);
-      if (!land) {
-        // Deterministic bathymetric lattice instead of random noise
-        const gridMatch =
-          Math.abs(lat % (step * 2.5)) < step * 0.45 &&
-          Math.abs(lon % (step * 2.5)) < lonStep * 0.45;
-        if (!gridMatch || oceanKeep <= 0) continue;
-      }
-
-      const radius = land
-        ? 1.008 + Math.max(0, elevationKm(lat, lon)) * relief * 0.65
-        : 1.002;
-      const v = latLonToVector3(lat, lon, radius);
+      const elev = elevationKm(lat, lon);
+      const v = latLonToVector3(lat, lon, 1.006 + elev * relief * 0.5);
       coords.push(v.x, v.y, v.z);
 
-      if (land) {
-        const hash = Math.abs(Math.sin(lat * 12.9898 + lon * 78.233) * 43758.5453) % 1;
-        const baseCol =
-          hash > 0.72
-            ? warmAmber
-            : hash > 0.35
-            ? continentSlate
-            : continentCyan;
-        const shade = hillshade(lat, lon, sun);
-        shadeTmp.copy(baseCol).multiplyScalar(shade * 0.88);
-        colors.push(shadeTmp.r, shadeTmp.g, shadeTmp.b);
-      } else {
-        colors.push(
-          oceanBathymetry.r * 0.55,
-          oceanBathymetry.g * 0.55,
-          oceanBathymetry.b * 0.55
-        );
-      }
+      const height = Math.min(1, elev / 3.2);
+      tint.copy(lowland).lerp(upland, height);
+      colors.push(tint.r, tint.g, tint.b);
+      sizes.push(0.8 + height * 0.22);
     }
   }
 
-  // 2. High-density India & Sri Lanka GIS pass (elevated holographic topography)
-  const indiaStep = Math.max(0.85, step * 0.48);
-  for (let lat = 5.5; lat <= 36.0; lat += indiaStep) {
-    for (let lon = 68.0; lon <= 97.5; lon += indiaStep) {
+  // 2. High-density India & Sri Lanka pass (elevated holographic topography)
+  const indiaStep = Math.max(0.62, step * 0.42);
+  row = 0;
+  for (let lat = 5.6; lat <= 36.2; lat += indiaStep, row++) {
+    const offset = row % 2 === 0 ? 0 : indiaStep * 0.5;
+    for (let lon = 68.0 + offset; lon <= 97.6; lon += indiaStep) {
       if (!isIndiaLand(lat, lon)) continue;
 
-      const elev = Math.max(0.2, elevationKm(lat, lon));
-      const radius = 1.016 + elev * relief;
-      const v = latLonToVector3(lat, lon, radius);
+      const elev = elevationKm(lat, lon);
+      const v = latLonToVector3(lat, lon, 1.016 + elev * relief);
       coords.push(v.x, v.y, v.z);
 
-      const coastDist = indiaCoastProximity(lat, lon);
-      const isBorder = coastDist < 1.6;
-      const isHighland = elev > 2.2;
-
-      if (isHighland) {
-        shadeTmp.copy(warmAmber).lerp(hotIvory, 0.55);
-      } else if (isBorder) {
-        shadeTmp.copy(signalOrange).lerp(hotIvory, 0.42);
+      if (elev > 2.2) {
+        tint.copy(warmAmber).lerp(hotIvory, 0.6);
+      } else if (indiaCoastProximity(lat, lon) < 0.9) {
+        tint.copy(signalOrange).lerp(hotIvory, 0.38);
       } else {
-        shadeTmp.copy(signalOrange).lerp(warmAmber, 0.38);
+        tint.copy(signalOrange).lerp(warmAmber, 0.3 + Math.min(0.4, elev * 0.3));
       }
-
-      colors.push(shadeTmp.r, shadeTmp.g, shadeTmp.b);
+      colors.push(tint.r, tint.g, tint.b);
+      sizes.push(0.78 + Math.min(0.5, elev * 0.12));
     }
   }
 
   return {
     positions: new Float32Array(coords),
     colors: new Float32Array(colors),
+    sizes: new Float32Array(sizes),
   };
 }
 
